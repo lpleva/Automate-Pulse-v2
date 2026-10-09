@@ -2,6 +2,17 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/custom-components/hacs)
 
+> **This is a fork** of [sillyfrog/Automate-Pulse-v2](https://github.com/sillyfrog/Automate-Pulse-v2)
+> carrying the October 2026 audit fixes (see `CHANGELOG.md`): the signal sensor
+> reads dBm on every path, the serial name lookup retries instead of leaving
+> Home Assistant with no entities, malformed or truncated hub messages no
+> longer tear the connection down, the polling interval is an option (default
+> 10 s instead of 2 s), and an opt-in live signal sweep polls the motors over
+> the hub's serial port. The `aiopulse2` library is vendored under
+> `custom_components/automate/vendor/` with every change recorded in
+> `VENDORED.md`. Add this repository to HACS as a custom repository instead of
+> upstream's URL.
+
 The Automate Pulse 2 Hub by Rollease Acmeda integration allows you to control and monitor covers via your Automate Pulse v2 Hub (see the [acmeda](/integrations/acmeda) integration for the v1 hub). The integration uses an [API](https://pypi.org/project/aiopulse2/) to directly communicate with hubs on the local network, rather than connecting via the cloud. [See this integration](https://www.home-assistant.io/integrations/acmeda/) if you have a v1 hub.
 
 Devices are represented as a cover for monitoring and control as well as a sensor for monitoring battery level and signal strength.
@@ -24,7 +35,16 @@ Once HA is back up, go to Configuration > Integrations > Add integration, and se
 
 This will prompt for the IP address of the hub and register the covers with Home Assistant. All devices are automatically discovered on the hub and you will have the opportunity to select the area each device is located.
 
-Once registration is complete, you should see a `cover` and a `sensor` entity for the battery for each device. Additionally there is a disabled sensors for the signal strength. The integration automatically manages the addition/update/removal of any devices connected on the hub at startup, including device names unless manually specified in Home Assistant.
+Once registration is complete, you should see a `cover` and a `sensor` entity for the battery for each device, plus a signal strength sensor in dBm. The integration automatically manages the addition/update of any devices connected on the hub at startup, including device names unless manually specified in Home Assistant.
+
+## Options (this fork)
+
+Settings > Devices & services > Automate Pulse Hub v2 > Configure:
+
+- **Hub state poll interval** (seconds, default 10, 2 to 300): how often the hub is asked for the state of every shade. Each request makes the hub serialise its whole state document, so raise this if you only need battery and signal (30 to 60 s is plenty).
+- **Live signal query interval** (seconds, default 0 = off, up to 3600): how often ONE shade is asked, over the hub's serial port, for a live radio signal reading; shades take turns. On Pulse Pro hubs the signal the hub reports over the websocket is its cached last reading and does not refresh on its own. Turn this on to watch signal quality live, off again to go back to the cached value.
+
+A change to either reloads the integration.
 
 ## Caveats
 
