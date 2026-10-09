@@ -25,7 +25,7 @@
                 },
                 "data_description": {
                     "poll_interval": "How often the hub is asked for the state of every shade. Each request makes the hub serialise its whole state document; 2 is the upstream default, 10 or more is kinder to the hub.",
-                    "signal_poll_interval": "How often ONE shade is asked, over the hub's serial port, for a live radio signal reading (shades take turns). The hub's own cached value does not refresh on its own on Pulse Pro hubs."
+                    "signal_poll_interval": "How often ONE shade is asked, over the hub's serial port, for a live radio signal reading (shades take turns). The hub's own cached value does not refresh on its own on Pulse Pro hubs. While this is on, a shade whose check got no reply shows an unknown signal rather than an old number, and a Missed signal checks sensor counts those misses."
                 }
             }
         }

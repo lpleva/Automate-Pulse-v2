@@ -42,7 +42,7 @@ Once registration is complete, you should see a `cover` and a `sensor` entity fo
 Settings > Devices & services > Automate Pulse Hub v2 > Configure:
 
 - **Hub state poll interval** (seconds, default 10, 2 to 300): how often the hub is asked for the state of every shade. Each request makes the hub serialise its whole state document, so raise this if you only need battery and signal (30 to 60 s is plenty).
-- **Live signal query interval** (seconds, default 0 = off; otherwise 10 to 3600): how often ONE shade is asked, over the hub's serial port, for a live radio signal reading; shades take turns. On Pulse Pro hubs the signal the hub reports over the websocket is its cached last reading and does not refresh on its own. Turn this on to watch signal quality live, off again to go back to the cached value.
+- **Live signal query interval** (seconds, default 0 = off; otherwise 10 to 3600): how often ONE shade is asked, over the hub's serial port, for a live radio signal reading; shades take turns. On Pulse Pro hubs the signal the hub reports over the websocket is its cached last reading and does not refresh on its own. Turn this on to watch signal quality live, off again to go back to the cached value. While it is on, the signal sensor reads `unknown` whenever there is no current live reading (the shade's last check got no reply, the reading has gone stale because the serial port is down, or the sweep has not reached that shade yet since a restart), and never the cached value, and each shade gets a **Missed signal checks** sensor (diagnostic, total increasing, with a `checks` attribute for the total) so an unreliable shade can be told from a good one.
 
 A change to either reloads the integration.
 

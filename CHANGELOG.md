@@ -5,6 +5,54 @@ This is Lukas Pleva's fork of
 It carries the October 2026 audit fixes upstream does not have; a Saturday job
 merges upstream into it and the delta is audited before it reaches `main`.
 
+## 1.2.0 (2026-10-09)
+
+Missed live signal checks are visible instead of hidden. Until now, with the
+live sweep on, a shade that did not answer its serial query (8 s of silence)
+kept showing its previous number, and after three sweep rounds the hub's
+cached `rs` came back in, so a shade that had not been heard from in an hour
+looked exactly like one read a minute ago. That is the wrong way round for
+the thing the sweep exists for: finding the shades with unstable signal.
+
+### Changed
+
+- **The signal sensor reads `unknown` when there is no current live reading**
+  (sweep on only). That is: the shade's most recent check got no reply, the
+  last reading is older than the stale window (three sweep rounds, at least
+  100 s; what a dead serial port looks like), or the sweep has not reached the
+  shade yet since Home Assistant started (with eight shades at 30 s, up to
+  about four minutes after a restart). The hub's cached `rs` is never shown
+  while the sweep is on, not even after the stale window: on a Pulse Pro it is
+  of unknown age. A later reply restores the number. With the sweep off
+  (the default, option at 0) nothing changes: the cached `rs` is the value.
+  Position handling is untouched.
+
+### Added
+
+- **`Missed signal checks` sensor** per shade (`sensor.<shade>_missed_signal_checks`,
+  diagnostic, `total_increasing`, no unit) with a `checks` attribute carrying
+  the total number of checks, so the miss rate is `misses / checks`. A check is
+  a sweep query whose serial session opened; a miss is a check that ended
+  without the shade's reply. A serial port that cannot be reached at all counts
+  neither, because that is the hub's fault, not the shade's. Only created
+  while the sweep is on: with it off no check is ever made and the sensor
+  would sit at 0 for good. (Turning the sweep off later leaves the entity in
+  the registry as unavailable until it is removed by hand; a known wart.) Both
+  counts start again at 0 on a restart, which `total_increasing` records as a
+  meter reset.
+- The options form's description of the live query interval says so.
+
+### Testing
+
+- 68 tests (60 before): a miss counted on silence, a check counted on a
+  reply, nothing counted when the port is unreachable (refused, and connect
+  timeout), the signal going `unknown` after a miss and back on the next
+  reply (including a reply with the same dBm, which must still notify), no
+  fallback to the cached `rs` with the sweep on, before the first reading and
+  after the stale window alike, sweep-off behaviour unchanged, and the new
+  sensor's state and `checks` attribute in Home Assistant, driven through the
+  fake serial port.
+
 ## 1.1.0 (2026-10-08)
 
 Audit release: the October 2026 security and correctness audit of the

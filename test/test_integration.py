@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -14,9 +14,10 @@ from custom_components.automate.const import (
     CONF_SIGNAL_POLL_INTERVAL,
     DOMAIN,
 )
-from custom_components.automate.vendor.aiopulse2 import errors
+from custom_components.automate.vendor.aiopulse2 import devices, errors
 
 from .conftest import HUB_HOST, HUB_ID, feed, settle
+from .test_library_serial import FakeSerialHub
 
 pytestmark = pytest.mark.usefixtures("no_network")
 
@@ -130,6 +131,10 @@ async def test_entities_and_devices(hass, config_entry):
     assert battery.state == "76"  # int(27.4 * 12.1 - 255)
     assert battery.attributes["voltage"] == 12.1
 
+    assert hass.states.get("sensor.kitchen_missed_signal_checks") is None, (
+        "no sweep, no checks to miss: the counter sensor is only created with the sweep on"
+    )
+
     cover = hass.states.get("cover.kitchen")
     assert cover.state == "open"
     assert cover.attributes["current_position"] == 70
@@ -167,8 +172,7 @@ async def test_signal_sensor_stays_in_dbm_after_a_serial_reading(hass, config_en
     assert hass.states.get("sensor.kitchen_signal").state == "-82"
 
 
-async def test_live_sweep_option_keeps_the_serial_reading(hass):
-    """Sweep on (opt-in): the live reading wins over the hub's cached rs."""
+def _sweep_entry(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={"host": HUB_HOST},
@@ -176,14 +180,72 @@ async def test_live_sweep_option_keeps_the_serial_reading(hass):
         options={CONF_SIGNAL_POLL_INTERVAL: 30},
     )
     entry.add_to_hass(hass)
-    hub = await _setup(hass, entry)
+    return entry
+
+
+async def test_live_sweep_option_keeps_the_serial_reading(hass):
+    """Sweep on (opt-in): the live reading is the value; the cached rs never is."""
+    hub = await _setup(hass, _sweep_entry(hass))
     assert hub.api.signal_poll_interval == 30
     await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}}, names={"ABC": "Kitchen"})
+    # Before the sweep has reached the shade there is no current reading
+    assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN
+    misses = hass.states.get("sensor.kitchen_missed_signal_checks")
+    assert misses is not None, hass.states.async_entity_ids()
+    assert misses.state == "0"
+    assert misses.attributes["checks"] == 0
+    assert misses.attributes["state_class"] == "total_increasing"
+    assert misses.attributes["friendly_name"] == "Kitchen Missed signal checks"
+    assert "unit_of_measurement" not in misses.attributes
+    ent_reg = er.async_get(hass)
+    assert ent_reg.async_get("sensor.kitchen_missed_signal_checks").unique_id == "ABC_signal_misses"
+    assert ent_reg.async_get("sensor.kitchen_missed_signal_checks").entity_category is er.EntityCategory.DIAGNOSTIC
+
     hub.api.response_parse("!ABCr050b000,R54;")
     await settle(hass)
     assert hass.states.get("sensor.kitchen_signal").state == "-92"
     await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 50}})
     assert hass.states.get("sensor.kitchen_signal").state == "-92"
+
+    # The reading goes stale (the serial port has been down): unknown, not the cached rs.
+    # The sweep tick is what notices; a hub poll alone does not re-report the sensor.
+    hub.api.rollers["ABC"].serial_signal_at -= hub.api.signal_stale_after() + 1
+    hub.api.expire_stale_signal_readings()
+    await settle(hass)
+    assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN
+    await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 50}})
+    assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN
+    hub.api.response_parse("!ABCr050b000,R54;")  # the port is back
+    await settle(hass)
+    assert hass.states.get("sensor.kitchen_signal").state == "-92"
+
+
+@pytest.mark.usefixtures("socket_enabled")
+async def test_a_missed_check_shows_in_home_assistant(hass, monkeypatch):
+    """A real miss through the fake serial port: the signal reads unknown, the counter moves."""
+    monkeypatch.setattr(devices, "SIGNAL_POLL_REPLY_TIMEOUT", 0.3)
+    fake = FakeSerialHub(silent={"ABC"})
+    hub = await _setup(hass, _sweep_entry(hass))
+    hub.api.host = "127.0.0.1"  # the serial session dials hub.host; the fake is local
+    hub.api.serial_port = await fake.start()
+    try:
+        await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}}, names={"ABC": "Kitchen"})
+        await hub.api._serial_query_position("ABC")  # what one sweep tick does
+        await settle(hass)
+        assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN
+        misses = hass.states.get("sensor.kitchen_missed_signal_checks")
+        assert misses.state == "1"
+        assert misses.attributes["checks"] == 1
+
+        fake.silent.clear()
+        await hub.api._serial_query_position("ABC")
+        await settle(hass)
+        assert hass.states.get("sensor.kitchen_signal").state == "-92"
+        misses = hass.states.get("sensor.kitchen_missed_signal_checks")
+        assert misses.state == "1"
+        assert misses.attributes["checks"] == 2
+    finally:
+        await fake.stop()
 
 
 async def test_battery_sensor_appears_once_the_motor_type_is_known(hass, config_entry):

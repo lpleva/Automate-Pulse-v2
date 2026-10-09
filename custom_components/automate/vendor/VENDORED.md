@@ -99,6 +99,23 @@ The package needed no import rewrite: it already used relative imports.
 13. **Heartbeat guard.** The poll loop's body is wrapped: `CancelledError` is
     re-raised, any other exception is logged as a warning and the loop keeps
     polling, since it is the only way state reaches consumers.
+14. **Missed signal checks are visible (1.2.0).** Each roller counts the
+    sweep's checks and misses (`signal_checks`, `signal_misses`, both
+    incremented in `_serial_query_position`): a check is a query whose serial
+    session opened, a miss is one that ended without that roller's reply. A
+    session that could not open at all (`OSError`, connect timeout) counts
+    neither, since that is the port, not the shade. `signal_missed` records
+    whether the latest check missed, `signal_stale` is set by
+    `expire_stale_signal_readings` (every sweep tick) once the last reading is
+    older than `signal_stale_after()`, and a reply clears both. The new
+    `Roller.signal_reading` is what a consumer shows: with the sweep off it is
+    `signal` (the cached `rs`, as upstream); with it on it is the latest live
+    reading, or None before the first reading, after a miss, or once stale.
+    `use_ws_signal` is now simply "sweep off": with the sweep on the cached
+    `rs` is never applied, not even after the stale window (until 1.1.0 it came
+    back then, so a dead port showed an old number as current). Position
+    (`use_ws_position`) is unchanged. Every check notifies the roller's
+    subscribers, so the counters reach consumers.
 
 `__init__.py`: exports `HubBaseException`; `__version__` is `1.0.0+lpleva`.
 `const.py`, `errors.py`: unchanged.
@@ -126,5 +143,5 @@ The package needed no import rewrite: it already used relative imports.
 ## Re-applying on a newer upstream
 
 Diff upstream's new release against the `v1.0.0` tag, then re-apply the
-thirteen changes above on top; the tests in `test/test_library_*.py` are the
+fourteen changes above on top; the tests in `test/test_library_*.py` are the
 acceptance suite. Upstream `main` has no tests of its own.

@@ -16,10 +16,13 @@ pytestmark = pytest.mark.usefixtures("socket_enabled")
 class FakeSerialHub:
     """A TCP server speaking the hub's serial protocol, just enough for the tests."""
 
-    def __init__(self, names=None, signal="54", answer=True):
+    def __init__(self, names=None, signal="54", answer=True, silent=()):
         self.names = names or {}
         self.signal = signal
         self.answer = answer
+        # Shade ids that never answer a position query (out of RF range), while
+        # the port itself and the other shades work as normal.
+        self.silent = set(silent)
         self.received = []
         self.connections = 0
         self.active = 0
@@ -52,7 +55,7 @@ class FakeSerialHub:
                 if cmd.endswith("NAME?;"):
                     if rid in self.names:
                         writer.write(f"!{rid}NAME{self.names[rid]};".encode())
-                elif cmd.endswith("r?;"):
+                elif cmd.endswith("r?;") and rid not in self.silent:
                     writer.write(f"!{rid}r050b000,R{self.signal};".encode())
                 await writer.drain()
         finally:
@@ -271,3 +274,108 @@ async def test_connect_timeout_releases_the_lock(monkeypatch):
     with pytest.raises(asyncio.TimeoutError):
         await hub._serial_query_position("ABC")
     assert not hub.serial_lock.locked()
+
+
+# --- missed signal checks ----------------------------------------------------------
+# A check is a sweep query whose serial session opened; a miss is one that ended
+# without the shade's reply. The hub's cached "rs" never stands in while the
+# sweep is on, so a miss shows as no reading rather than as an old number.
+
+
+async def _named_hub(fake, shades):
+    hub = await _hub_with_fake(fake, signal_poll_interval=10)
+    await hub.wsconsumer(shadow_message({rid: {"rs": -82} for rid in shades}))
+    await asyncio.wait_for(hub.rollers_known.wait(), 3)
+    await asyncio.wait_for(hub.serial_task, 3)
+    return hub
+
+
+async def test_a_silent_shade_counts_a_miss_and_reads_none():
+    fake = FakeSerialHub(names={"ABC": "Kitchen"}, silent={"ABC"})
+    hub = await _named_hub(fake, ["ABC"])
+    roller = hub.rollers["ABC"]
+    seen = []
+
+    async def record(r):
+        seen.append((r.signal_checks, r.signal_misses))
+
+    roller.callback_subscribe(record)
+    try:
+        assert roller.signal_reading is None, "the cached rs is not a reading"
+        await hub._serial_query_position("ABC")
+        await asyncio.sleep(0)
+        assert "!ABCr?;" in fake.received, "the query was sent"
+        assert (roller.signal_checks, roller.signal_misses) == (1, 1)
+        assert roller.signal_missed is True
+        assert roller.signal_reading is None
+        assert seen == [(1, 1)], "consumers are told the counts changed"
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_a_reply_counts_a_check_and_no_miss():
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _named_hub(fake, ["ABC"])
+    roller = hub.rollers["ABC"]
+    try:
+        await hub._serial_query_position("ABC")
+        assert (roller.signal_checks, roller.signal_misses) == (1, 0)
+        assert roller.signal_missed is False
+        assert roller.signal_reading == -92
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_an_unreachable_port_counts_neither_a_check_nor_a_miss(monkeypatch):
+    """The port is the hub's problem; the shade is not blamed for it."""
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _named_hub(fake, ["ABC"])
+    roller = hub.rollers["ABC"]
+    try:
+        await hub._serial_query_position("ABC")  # one good reading first
+        assert (roller.signal_checks, roller.signal_misses) == (1, 0)
+        await fake.stop()  # nothing listens on that port now: connection refused
+        with pytest.raises(OSError):
+            await hub._serial_query_position("ABC")
+        assert (roller.signal_checks, roller.signal_misses) == (1, 0)
+        assert roller.signal_missed is False
+
+        # A connect timeout is the same story
+        monkeypatch.setattr(devices, "SERIAL_CONNECT_TIMEOUT", 0.05)
+
+        async def hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(devices.asyncio, "open_connection", hang)
+        with pytest.raises(asyncio.TimeoutError):
+            await hub._serial_query_position("ABC")
+        assert (roller.signal_checks, roller.signal_misses) == (1, 0)
+    finally:
+        await hub._cancel_background_tasks()
+
+
+async def test_signal_is_none_after_a_miss_and_back_on_the_next_reply():
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _named_hub(fake, ["ABC"])
+    roller = hub.rollers["ABC"]
+    try:
+        await hub._serial_query_position("ABC")
+        assert roller.signal_reading == -92
+        fake.silent.add("ABC")
+        await hub._serial_query_position("ABC")
+        assert roller.signal_reading is None
+        assert roller.signal == -92, "the last value is kept, just not reported"
+        # The cached rs must not sneak in through the shadow while the shade is out
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        assert roller.signal_reading is None
+        fake.silent.discard("ABC")
+        await hub._serial_query_position("ABC")
+        assert roller.signal_reading == -92
+        assert roller.signal_missed is False
+        assert (roller.signal_checks, roller.signal_misses) == (3, 1)
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+

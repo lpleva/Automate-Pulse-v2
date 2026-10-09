@@ -64,11 +64,15 @@ SERIAL_SIGNAL_OFFSET = 134
 # The sweep asks ONE shade every signal_poll_interval seconds, round-robin, so at
 # 30 s with eight shades each one refreshes about every four minutes. OFF by
 # default (0): a consumer opts in, and with it off the cached "rs" is used as is.
+# With it ON the cached "rs" is never used: a shade's signal is its latest live
+# reading, or None when its last check got no reply or the reading has gone stale
+# (Roller.signal_reading). An old number shown as current is worse than no number.
 DEFAULT_SIGNAL_POLL_INTERVAL = 0
 MIN_SIGNAL_POLL_INTERVAL = 10
 SIGNAL_POLL_REPLY_TIMEOUT = 8
-# A serial reading older than this many sweep rounds is stale, and the websocket's
-# cached "rs" is used again until the sweep recovers.
+# A live reading older than this many sweep rounds is stale: the signal reads None
+# until the sweep recovers, and the websocket's cached "mp" applies to the
+# position again.
 SIGNAL_STALE_ROUNDS = 3
 
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -319,6 +323,12 @@ class Hub:
             },
         )
         changed = roller.set_signal(signal) or changed
+        if roller.signal_missed or roller.signal_stale:
+            # A reply after a miss or a stale spell restores the reading even if
+            # the dBm is the same number as before, so consumers must be told.
+            roller.signal_missed = False
+            roller.signal_stale = False
+            changed = True
         now = time.monotonic()
         roller.serial_signal_at = now
         roller.serial_position_at = now
@@ -376,7 +386,14 @@ class Hub:
         )
 
     async def _serial_query_position(self, rollerid: str) -> None:
-        """Ask the motor, live over RF, for its position and signal."""
+        """Ask the motor, live over RF, for its position and signal.
+
+        Counts the outcome on the roller. A check is a session that opened; a
+        miss is a check that ended (SIGNAL_POLL_REPLY_TIMEOUT of quiet, or the
+        hub closing) without this roller's reply. A port that cannot be reached
+        at all raises out of _serial_session before anything is counted: that is
+        the hub's problem, not the shade's.
+        """
         roller = self.rollers[rollerid]
         before = roller.serial_signal_at
         await self._serial_session(
@@ -384,9 +401,23 @@ class Hub:
             SIGNAL_POLL_REPLY_TIMEOUT,
             done=lambda: roller.serial_signal_at != before,
         )
+        roller.signal_checks += 1
+        if roller.serial_signal_at == before:
+            roller.signal_misses += 1
+            roller.signal_missed = True
+            _LOGGER.debug(
+                "%s: no signal reply from %s (%d of %d checks missed)",
+                self.host,
+                rollerid,
+                roller.signal_misses,
+                roller.signal_checks,
+            )
+        # The counts changed either way (a reply already notified for the
+        # reading itself; this is for the counters).
+        roller.notify_callback()
 
     def signal_stale_after(self) -> float:
-        """Seconds after which a live serial reading no longer overrides "rs"."""
+        """Seconds after which a live serial reading no longer counts as current."""
         rounds = max(len(self.rollers), 1) * self.signal_poll_interval
         return max(SIGNAL_STALE_ROUNDS * rounds, 10 * MIN_SIGNAL_POLL_INTERVAL)
 
@@ -399,10 +430,12 @@ class Hub:
     def use_ws_signal(self, roller) -> bool:
         """True when the websocket's cached "rs" applies to this roller.
 
-        The live serial reading wins while the sweep is on and keeping it fresh;
-        the cached value is used again if the sweep is off or has fallen behind.
+        Only while the sweep is off. With it on, the cached value is never
+        applied, not even before the first live reading or after the live
+        reading has gone stale: on a Pulse Pro "rs" is of unknown age, and
+        Roller.signal_reading reports None for those cases instead.
         """
-        return not self._live_reading_is_fresh(roller.serial_signal_at)
+        return self.signal_poll_interval <= 0
 
     def use_ws_position(self, roller) -> bool:
         """True when the websocket's cached "mp" applies to this roller.
@@ -414,6 +447,25 @@ class Hub:
         """
         return not self._live_reading_is_fresh(roller.serial_position_at)
 
+    def expire_stale_signal_readings(self) -> None:
+        """Flag, once, every live reading that has aged past signal_stale_after().
+
+        Consumers only hear from a roller when it notifies, and a hub poll only
+        notifies on a hub-level change, so without this a reading would keep
+        showing after the serial port went down. Called every sweep tick (so
+        while the port is down, at least every SERIAL_RETRY_MAX seconds); the
+        next reply clears the flag.
+        """
+        for roller in self.rollers.values():
+            if (
+                roller.serial_signal_at is not None
+                and not roller.signal_stale
+                and not self._live_reading_is_fresh(roller.serial_signal_at)
+            ):
+                roller.signal_stale = True
+                _LOGGER.debug("%s: live signal reading for %s is stale", self.host, roller.id)
+                roller.notify_callback()
+
     async def signal_sweep(self):
         """Query one shade's live signal every signal_poll_interval seconds."""
         backoff = 0.0
@@ -421,6 +473,7 @@ class Hub:
             await asyncio.sleep(max(backoff, self.signal_poll_interval))
             if not self.running:
                 break
+            self.expire_stale_signal_readings()
             named = [rid for rid, r in self.rollers.items() if r.name is not None]
             if not named or self.unknown_rollers:
                 # Nothing to sweep yet, or the name lookup needs the port first
@@ -896,6 +949,16 @@ class Roller:
         # apart: a command through this library clears the position one.
         self.serial_signal_at = None
         self.serial_position_at = None
+        # The live sweep's record for this roller: how many checks opened a
+        # serial session, how many of those ended without its reply, and whether
+        # the most recent one did. Counted in Hub._serial_query_position; reset
+        # when the Hub is rebuilt (a restart), never otherwise. signal_stale is
+        # set by Hub.expire_stale_signal_readings when the last live reading has
+        # aged past signal_stale_after(); a reply clears both flags.
+        self.signal_checks = 0
+        self.signal_misses = 0
+        self.signal_missed = False
+        self.signal_stale = False
         self.version = None
         self._moving = False
         self.action = MovingAction.stopped
@@ -950,6 +1013,25 @@ class Roller:
     def has_battery(self):
         """True if device appears to be battery operated"""
         return self.devicetypeshort in ("D", "U", "d")
+
+    @property
+    def signal_reading(self) -> Optional[float]:
+        """The signal, in dBm, that can honestly be called current.
+
+        Sweep off: the hub's cached "rs", as upstream reports it. Sweep on: the
+        latest live reading, or None when there is no current one: the last
+        check got no reply, the reading is older than signal_stale_after() (the
+        serial port has been down), or the sweep has not reached this roller yet
+        since the hub was built. The cached "rs" is never substituted: on a Pulse
+        Pro it is of unknown age, which is why the sweep exists.
+        """
+        if self.hub.signal_poll_interval <= 0:
+            return self.signal
+        if self.signal_missed or self.signal_stale:
+            return None
+        if not self.hub._live_reading_is_fresh(self.serial_signal_at):
+            return None  # between sweep ticks the clock is the truth, the flag follows
+        return self.signal
 
     @property
     def moving(self):

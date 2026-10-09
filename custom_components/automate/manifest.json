@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/sillyfrog/Automate-Pulse-v2/issues",
   "loggers": ["custom_components.automate"],
   "requirements": ["websockets>=13"],
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

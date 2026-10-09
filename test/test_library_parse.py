@@ -62,14 +62,79 @@ async def test_live_serial_signal_wins_over_cached_ws_value():
     assert hub.rollers["ABC"].signal == -92, "cached rs overwrote the live reading"
 
 
-async def test_cached_ws_signal_returns_when_serial_reading_is_stale():
+async def test_stale_live_reading_reads_none_and_the_cached_rs_never_returns():
+    """Until 1.2.0 a stale reading let the cached rs back in, so a dead serial
+    port showed an old number as if it were current."""
     hub = Hub(HUB_HOST, delay_callbacks=False, signal_poll_interval=30)
     await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
     hub.response_parse("!ABCr050b000,R54;")
     roller = hub.rollers["ABC"]
+    assert roller.signal_reading == -92
     roller.serial_signal_at = time.monotonic() - hub.signal_stale_after() - 1
+    assert roller.signal_reading is None
     await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
-    assert roller.signal == -82
+    assert roller.signal == -92, "the cached rs overwrote the live value"
+    assert roller.signal_reading is None
+    # The sweep tick flags it once, so consumers hear about it
+    seen = []
+
+    async def record(r):
+        seen.append(r.signal_reading)
+
+    roller.callback_subscribe(record)
+    hub.expire_stale_signal_readings()
+    hub.expire_stale_signal_readings()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert seen == [None], "flagged once, not on every tick"
+    assert roller.signal_stale is True
+    hub.response_parse("!ABCr050b000,R54;")  # the sweep recovers
+    assert roller.signal_reading == -92
+    assert roller.signal_stale is False
+
+
+async def test_sweep_on_reads_none_before_the_first_live_reading():
+    """The cached rs is of unknown age on a Pulse Pro, so it is not shown as current."""
+    hub = Hub(HUB_HOST, delay_callbacks=False, signal_poll_interval=30)
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
+    roller = hub.rollers["ABC"]
+    assert roller.signal is None and roller.signal_reading is None
+    assert (roller.signal_checks, roller.signal_misses) == (0, 0)
+    hub.response_parse("!ABCr050b000,R54;")
+    assert roller.signal_reading == -92
+
+
+async def test_sweep_off_reads_the_cached_rs_as_before(hub):
+    """1.1.0 behaviour, untouched: with the sweep off the hub's value is the reading."""
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
+    roller = hub.rollers["ABC"]
+    assert roller.signal_reading == -82
+    hub.response_parse("!ABCr050b000,R54;")
+    assert roller.signal_reading == -92
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
+    assert roller.signal_reading == -82
+    assert (roller.signal_checks, roller.signal_misses) == (0, 0), "no sweep, no checks"
+
+
+async def test_a_reply_with_the_same_dbm_after_a_miss_still_notifies():
+    """Reading back from None to -92: the number did not change, the state did."""
+    hub = Hub(HUB_HOST, delay_callbacks=False, signal_poll_interval=30)
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True}}))
+    roller = hub.rollers["ABC"]
+    hub.response_parse("!ABCr050b000,R54;")
+    roller.signal_missed = True  # what a check without a reply records
+    assert roller.signal_reading is None
+    seen = []
+
+    async def record(r):
+        seen.append(r.signal_reading)
+
+    roller.callback_subscribe(record)
+    hub.response_parse("!ABCr050b000,R54;")  # same -92 as before
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert seen == [-92]
+    assert roller.signal_missed is False
 
 
 async def test_serial_position_response_notifies_on_change(hub):
