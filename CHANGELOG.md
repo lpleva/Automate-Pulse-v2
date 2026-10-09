@@ -39,7 +39,11 @@ records the upstream version and every change.
   with callbacks held until names are known, Home Assistant then created no
   entities until a restart. The lookup now retries with a back-off, falls back
   to the placeholder name `Shade <id>` after three attempts, and asks again
-  hourly.
+  hourly. Know that entity ids are minted from the first name: if the hub is
+  slow at first setup, the entities are `cover.shade_abc`,
+  `sensor.shade_abc_signal` for good (the friendly names update when the real
+  name arrives). Set up the integration while the hub is responsive, or rename
+  the entities afterwards.
 - **A shadow without `shades` tore the websocket down** (`KeyError` in the
   consumer) and reconnected 10 s later, for every such message. Parsing is
   defensive throughout; one malformed shade no longer drops the whole message.
@@ -60,12 +64,14 @@ records the upstream version and every change.
   the hub moved). The connection test is bounded at 20 s; connection errors are
   `cannot_connect`, anything else is logged as a bug and shown as `unknown`;
   the title falls back to `Pulse Hub (<host>)` for an unnamed hub.
-- **Deprecated Home Assistant APIs** (HA 2026.9 warns on each; removed in
-  2027.8): the `via_device` identifier tuple (now `via_device_id`),
-  `device_registry.async_get_device` (now `async_get_device_by_identifier`),
-  sensor `state` overrides (now `native_value`), the `should_poll` property,
-  and the `CONN_CLASS_LOCAL_PUSH` constant (dead since 2021.6). The cover's
-  tilt methods were misnamed, never enabled and are removed.
+- **Deprecated Home Assistant APIs** (HA 2026.9 logs a warning on each use;
+  both stop working in 2027.8): the `via_device` identifier tuple (now
+  `via_device_id`) and `device_registry.async_get_device` (now
+  `async_get_device_by_identifier`). Cleanups alongside, not deprecations:
+  sensors return `native_value` instead of overriding `state`, `should_poll`
+  is a class attribute, the `CONN_CLASS_LOCAL_PUSH` constant (unused by HA
+  since 2021.6) is gone, and the cover's tilt methods, which were misnamed and
+  never enabled, are removed.
 - **State writes off the event loop.** The entity callback was a plain
   function, which the library ran in an executor thread for every update; it
   is a coroutine now and writes state on the loop.
@@ -90,8 +96,10 @@ Upstream asked the hub for its full shadow every 2 s: 1,800 requests an hour,
 kB on the Pulse Pro logs in aiopulse2 #15, so roughly 100 MB a day of JSON from
 one client) on a hub that also runs a Matter stack. **The default is now 10 s**
 and the interval is an option (2 to 300 s): Settings, Devices & services,
-Automate Pulse Hub v2, Configure. 30 to 60 s is plenty when the shades are
-driven through Matter and this integration only supplies battery and signal.
+Automate Pulse Hub v2, Configure. The cost: the cover entities learn about a
+move made from the app or a remote up to one poll later, so 10 s instead of
+2 s. 30 to 60 s is plenty when the shades are driven through Matter and this
+integration only supplies battery and signal.
 
 ### Added: live signal sweep (opt-in, off by default)
 
@@ -100,10 +108,20 @@ not refresh on its own, while the serial query `!<id>r?;` polls the motor live
 over RF and returns a fresh reading every time (a few seconds each). The new
 option "Live signal query interval" asks ONE shade per interval, round-robin
 (at 30 s with eight shades each refreshes about every four minutes). While it
-is on, the live reading is kept over the cached `rs`; set it back to 0 and the
-cached value is used again, no code change. One RF exchange per interval is a
-small fraction of the hub's own traffic; the integration never opens port 1487
-twice at once.
+is on, the live reading (signal and position; the cached position also goes
+stale after remote moves on this hub) is kept over the cached shadow values
+until it is three sweep rounds old; set it back to 0 and the cached values are
+used again, no code change. The option accepts 0 (off) or 10 to 3600 s. One RF
+exchange per interval is a small fraction of the hub's own traffic; the
+integration never opens port 1487 twice at once, and a dead port cannot hold
+the serial lock for more than 10 s.
+
+### Known, left as is
+
+- Unloading the entry unloads the platforms first and stops the library
+  second (upstream's order, `__init__.py`); a hub update arriving in between
+  is dispatched to platforms that are already gone. Harmless in practice (the
+  listeners are disconnected by then), noted for completeness.
 
 ### Testing
 

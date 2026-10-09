@@ -108,7 +108,7 @@ class AutomateBase(entity.Entity):
         # out when the hub device is not registered yet, because HA raises on an
         # unknown via_device_id and the platform then drops the entity.
         hub_device = get_dev_reg(self.hass).async_get_device_by_identifier(
-            (DOMAIN, self.roller.hub.id), self.config_entry_id
+            (DOMAIN, str(self.roller.hub.id)), self.config_entry_id
         )
         if hub_device is not None:
             info["via_device_id"] = hub_device.id

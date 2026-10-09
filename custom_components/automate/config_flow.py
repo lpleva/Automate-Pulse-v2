@@ -66,7 +66,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "unknown"
             else:
                 if hub.id:
-                    await self.async_set_unique_id(hub.id)
+                    await self.async_set_unique_id(str(hub.id))
                     self._abort_if_unique_id_configured(updates={"host": host})
                 title = hub.name or f"Pulse Hub ({host})"
                 return self.async_create_entry(title=title, data={"host": host})
@@ -98,7 +98,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     ),
                 ): vol.All(
                     vol.Coerce(int),
-                    vol.Range(min=MIN_SIGNAL_POLL_INTERVAL, max=MAX_SIGNAL_POLL_INTERVAL),
+                    # 0 is "off"; anything else must be at least the library's floor
+                    vol.Any(
+                        0,
+                        vol.Range(min=MIN_SIGNAL_POLL_INTERVAL, max=MAX_SIGNAL_POLL_INTERVAL),
+                    ),
                 ),
             }
         )

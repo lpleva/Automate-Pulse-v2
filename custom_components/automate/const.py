@@ -13,7 +13,7 @@ MAX_POLL_INTERVAL = 300
 
 CONF_SIGNAL_POLL_INTERVAL = "signal_poll_interval"
 DEFAULT_SIGNAL_POLL_INTERVAL = 0  # off until the user opts in (Lukas, 2026-10-08)
-MIN_SIGNAL_POLL_INTERVAL = 0  # 0 turns the live signal sweep off
+MIN_SIGNAL_POLL_INTERVAL = 10  # the library's floor; 0 (off) is accepted separately
 MAX_SIGNAL_POLL_INTERVAL = 3600
 
 # Seconds the config flow waits for the hub's first reply before giving up.

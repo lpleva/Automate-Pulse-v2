@@ -141,10 +141,24 @@ async def test_wsconsumer_skips_the_shade_cut_in_half(hub):
     await hub.wsconsumer(_msg({"A": {"rs": -82, "mp": 20}, "B": {"rs": -70, "mp": 100}}))
     assert hub.rollers["B"].closed_percent == 100
     full = _msg({"A": {"rs": -82, "mp": 20}, "B": {"rs": -70, "mp": 10}})
-    cut = full[: full.rindex(", ") ]  # inside B: `"mp": 10` would be a wrong 100 -> 10
+    cut = full[: full.rindex("10") + 1]  # ends in `"mp": 1`: a repaired, WRONG value
+    assert cut.endswith('"mp": 1')
     await hub.wsconsumer(cut)
     assert hub.rollers["A"].signal == -82
     assert hub.rollers["B"].closed_percent == 100, "partial shade must be ignored"
+
+
+async def test_live_position_wins_over_cached_ws_value_until_stale():
+    hub = Hub(HUB_HOST, delay_callbacks=False, signal_poll_interval=30)
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 30}}))
+    roller = hub.rollers["ABC"]
+    hub.response_parse("!ABCr050b000,R54;")  # live: 50 % closed
+    assert roller.closed_percent == 50
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 30}}))
+    assert roller.closed_percent == 50, "the cached position flapped the live one back"
+    roller.serial_signal_at = time.monotonic() - hub.signal_stale_after() - 1
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 30}}))
+    assert roller.closed_percent == 30
 
 
 async def test_unparseable_message_warns_once_then_debug(hub, caplog):

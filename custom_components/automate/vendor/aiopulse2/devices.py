@@ -48,6 +48,7 @@ SEND_HANDSHAKE_TIMEOUT = 10
 # doubling back-off, and after SERIAL_FALLBACK_ATTEMPTS failed attempts give each
 # still-unnamed roller a placeholder name so callers are not blocked forever.
 SERIAL_PORT = 1487
+SERIAL_CONNECT_TIMEOUT = 10  # a dead port must not hold serial_lock for minutes
 SERIAL_READ_TIMEOUT = 3
 SERIAL_RETRY_MIN = 10
 SERIAL_RETRY_MAX = 300
@@ -307,6 +308,9 @@ class Hub:
         if roller is None:
             _LOGGER.debug("Serial position response for unknown roller %s", id)
             return
+        # Live values from the motor: position and signal both follow the
+        # "live wins until stale" rule in use_ws_values, so the hub's cached
+        # shadow cannot flap them back between sweep replies.
         changed = self.applychanges(
             roller,
             {
@@ -340,9 +344,10 @@ class Hub:
         lookup and the signal sweep never open port 1487 at the same time.
         """
         async with self.serial_lock:
-            reader, writer = await asyncio.open_connection(
-                self.host, port=self.serial_port
-            )
+            async with asyncio.timeout(SERIAL_CONNECT_TIMEOUT):
+                reader, writer = await asyncio.open_connection(
+                    self.host, port=self.serial_port
+                )
             try:
                 for buf in commands:
                     writer.write(buf.encode())
@@ -383,11 +388,13 @@ class Hub:
         rounds = max(len(self.rollers), 1) * self.signal_poll_interval
         return max(SIGNAL_STALE_ROUNDS * rounds, 10 * MIN_SIGNAL_POLL_INTERVAL)
 
-    def use_ws_signal(self, roller) -> bool:
-        """True when the websocket's cached "rs" should be applied to this roller.
+    def use_ws_values(self, roller) -> bool:
+        """True when the websocket's cached "rs" and "mp" apply to this roller.
 
-        The live serial reading wins while the sweep is on and keeping it fresh;
-        the cached value is used again if the sweep is off or has fallen behind.
+        The live serial reading (signal AND position) wins while the sweep is on
+        and keeping it fresh; the cached values are used again if the sweep is
+        off or has fallen behind. On the Pulse Pro the cached position also goes
+        stale after remote moves, so the live value is the better one.
         """
         if self.signal_poll_interval <= 0 or roller.serial_signal_at is None:
             return True
@@ -463,7 +470,7 @@ class Hub:
                 try:
                     await self._serial_query_names(list(self.unknown_rollers))
                 except (OSError, asyncio.TimeoutError) as e:
-                    # Connection refused / no route / handshake timeout
+                    # Connection refused / no route / connect or handshake timeout
                     if self.lastserialerror != str(e):
                         _LOGGER.warning(
                             "%s: serial port %d unavailable: %s",
@@ -472,12 +479,18 @@ class Hub:
                             e,
                         )
                         self.lastserialerror = str(e)
+                except Exception as e:  # a bad reply must not end the lookup
+                    _LOGGER.info("Error in serial running: %s", e)
                 if not self.unknown_rollers:
                     self.serialok = True
                     self.lastserialerror = None
                     break
                 attempts += 1
-                if attempts >= SERIAL_FALLBACK_ATTEMPTS and self.unnamed_rollers():
+                if attempts >= SERIAL_FALLBACK_ATTEMPTS:
+                    # Names the port never gave: placeholders for rollers that
+                    # have none, and release the queue either way (a roller
+                    # re-queued from a placeholder keeps it). The hourly tick
+                    # asks again.
                     self._apply_fallback_names()
                     break
                 delay = next_backoff(delay, SERIAL_RETRY_MIN, SERIAL_RETRY_MAX)
@@ -490,8 +503,6 @@ class Hub:
                 await asyncio.sleep(delay)
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            _LOGGER.info("Error in serial running: %s", e)
         finally:
             self.serialrunning = False
 
@@ -504,9 +515,9 @@ class Hub:
         self.serial_task = asyncio.create_task(self.serialrunner())
 
     def requeue_placeholder_names(self) -> None:
-        """Ask the serial port again for rollers that only have a placeholder name."""
+        """Ask the serial port again for rollers with a placeholder name or none."""
         for rollerid, roller in self.rollers.items():
-            if roller.name_is_placeholder:
+            if roller.name_is_placeholder or roller.name is None:
                 self.unknown_rollers.add(rollerid)
         if self.unknown_rollers and self.running and not self.serialrunning:
             self.serialrunning = True
@@ -556,24 +567,29 @@ class Hub:
         """
         reset_request_counter = 3600 / self.heartbeatinterval
         while self.running:
-            if self.ws and self.ws.state == State.OPEN and self.handshake.is_set():
-                if self.payload_queue:
-                    payload = self.payload_queue.pop(0)
-                    success = await self.sendws(payload)
-                    if not success:
-                        self.payload_queue.append(payload)
-                await self.sendws(
-                    {"method": "shadow", "src": "app", "id": int(time.time())}
-                )
+            try:
+                if self.ws and self.ws.state == State.OPEN and self.handshake.is_set():
+                    if self.payload_queue:
+                        payload = self.payload_queue.pop(0)
+                        success = await self.sendws(payload)
+                        if not success:
+                            self.payload_queue.append(payload)
+                    await self.sendws(
+                        {"method": "shadow", "src": "app", "id": int(time.time())}
+                    )
+                reset_request_counter -= 1
+                if reset_request_counter <= 0:
+                    # About once an hour allow a request to be made to the hub to
+                    # get the rollers details again, and retry any names the
+                    # serial port never supplied.
+                    self.sent_details_request.clear()
+                    self.requeue_placeholder_names()
+                    reset_request_counter = 3600 / self.heartbeatinterval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # keep polling; this loop is the hub's pulse
+                _LOGGER.warning("%s: heartbeat error, polling continues: %s", self.host, e)
             await asyncio.sleep(self.heartbeatinterval)
-            reset_request_counter -= 1
-            if reset_request_counter <= 0:
-                # About once an hour allow a request to be made to the hub to get the
-                # rollers details again, and retry any names the serial port never
-                # supplied.
-                self.sent_details_request.clear()
-                self.requeue_placeholder_names()
-                reset_request_counter = 3600 / self.heartbeatinterval
 
     def applychanges(self, obj: Any, newvalues: Dict[str, Any]) -> bool:
         """Applies and reports changes from newvals to the attributes of obj
@@ -595,13 +611,14 @@ class Hub:
         keys from the last shade, and defaults here would make that shade flap.
         """
         newvals: Dict[str, Any] = {}
-        if "rs" in roller and self.use_ws_signal(self.rollers[rollerid]):
+        use_cached = self.use_ws_values(self.rollers[rollerid])
+        if "rs" in roller and use_cached:
             newvals["signal"] = roller["rs"]
         if "is" in roller:
             newvals["moving"] = not roller["is"]
         if "ol" in roller:
             newvals["online"] = bool(roller["ol"])
-        if roller.get("mp") is not None:
+        if roller.get("mp") is not None and use_cached:
             try:
                 newvals["closed_percent"] = int(roller["mp"])
             except (TypeError, ValueError):

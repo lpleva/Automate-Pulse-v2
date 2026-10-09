@@ -113,7 +113,7 @@ class PulseHub:
         """Device registry fields for the hub itself, from what it reported."""
         info = {
             "config_entry_id": self.config_entry.entry_id,
-            "identifiers": {(DOMAIN, self.api.id)},
+            "identifiers": {(DOMAIN, str(self.api.id))},
             "manufacturer": "Rollease Acmeda",
             "model": self.api.model or "Pulse Hub",
             "name": f"{self.api.name or 'Pulse Hub'} ({self.api.host})",

@@ -126,6 +126,26 @@ async def test_heartbeat_sends_shadow_poll_at_the_configured_interval():
     assert sock.closed
 
 
+async def test_heartbeat_survives_an_unexpected_error(caplog):
+    sock = FakeWebSocket([shadow_message({"ABC": {"rs": -82, "ol": True}})])
+    real_send = sock.send
+    calls = []
+
+    async def flaky_send(data):
+        calls.append(data)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        await real_send(data)
+
+    sock.send = flaky_send
+    hub = Hub(HUB_HOST, signal_poll_interval=0, poll_interval=2)
+    hub.heartbeatinterval = 0.05
+    async with running(hub, [sock]):
+        await asyncio.sleep(0.3)
+        assert len(calls) >= 3, "the heartbeat stopped after the first error"
+        assert "heartbeat error, polling continues" in caplog.text
+
+
 async def test_clean_close_by_hub_reconnects_and_marks_disconnected(fast):
     first = FakeWebSocket([shadow_message({"ABC": {"rs": -82, "ol": True}})])
     second = FakeWebSocket([shadow_message({"ABC": {"rs": -70, "ol": True}})])

@@ -22,6 +22,8 @@ class FakeSerialHub:
         self.answer = answer
         self.received = []
         self.connections = 0
+        self.active = 0
+        self.max_concurrent = 0
         self.server = None
 
     async def start(self):
@@ -34,6 +36,8 @@ class FakeSerialHub:
 
     async def _handle(self, reader, writer):
         self.connections += 1
+        self.active += 1
+        self.max_concurrent = max(self.max_concurrent, self.active)
         try:
             while True:
                 try:
@@ -52,6 +56,7 @@ class FakeSerialHub:
                     writer.write(f"!{rid}r050b000,R{self.signal};".encode())
                 await writer.drain()
         finally:
+            self.active -= 1
             writer.close()
 
 
@@ -192,10 +197,77 @@ async def test_serial_sessions_never_overlap():
         await asyncio.wait_for(hub.rollers_known.wait(), 3)
         await asyncio.wait_for(hub.serial_task, 3)
         await asyncio.gather(
-            hub._serial_query_position("ABC"), hub._serial_query_position("ABC")
+            hub._serial_query_position("ABC"),
+            hub._serial_query_position("ABC"),
+            hub._serial_query_position("ABC"),
         )
-        assert fake.connections == 3
+        assert fake.connections == 4
+        assert fake.max_concurrent == 1, "two serial sessions were open at once"
         assert hub.rollers["ABC"].signal == -92
     finally:
         await hub._cancel_background_tasks()
         await fake.stop()
+
+
+async def test_requeue_against_a_silent_port_ends_and_the_sweep_resumes():
+    """Reviewer finding: the hourly requeue used to retry forever and starve the sweep."""
+    fake = FakeSerialHub(answer=False)
+    hub = await _hub_with_fake(fake, signal_poll_interval=10)
+    hub.signal_poll_interval = 0.05
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert hub.rollers["ABC"].name == "Shade ABC"
+        assert fake.connections == devices.SERIAL_FALLBACK_ATTEMPTS
+
+        hub.requeue_placeholder_names()  # the hourly tick, port still silent
+        await asyncio.wait_for(hub.serial_task, 5)  # must END, not loop forever
+        assert fake.connections == 2 * devices.SERIAL_FALLBACK_ATTEMPTS
+        assert hub.unknown_rollers == set()
+        assert hub.rollers["ABC"].name == "Shade ABC"
+
+        hub.signal_task = asyncio.create_task(hub.signal_sweep())
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if any(c.endswith("r?;") for c in fake.received):
+                break
+        assert "!ABCr?;" in fake.received, "the sweep stayed blocked"
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_a_bad_reply_does_not_end_the_name_lookup(monkeypatch):
+    fake = FakeSerialHub(answer=False)
+    hub = await _hub_with_fake(fake)
+    calls = []
+
+    async def boom(rollerids):
+        calls.append(1)
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(hub, "_serial_query_names", boom)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert len(calls) == devices.SERIAL_FALLBACK_ATTEMPTS
+        assert hub.rollers["ABC"].name == "Shade ABC", "no roller is left nameless"
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_connect_timeout_releases_the_lock(monkeypatch):
+    monkeypatch.setattr(devices, "SERIAL_CONNECT_TIMEOUT", 0.05)
+
+    async def hang(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(devices.asyncio, "open_connection", hang)
+    hub = Hub("127.0.0.1", serial_port=1)
+    hub.running = True
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+    await hub._cancel_background_tasks()  # stop the name runner; test the session alone
+    with pytest.raises(asyncio.TimeoutError):
+        await hub._serial_query_position("ABC")
+    assert not hub.serial_lock.locked()

@@ -6,7 +6,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 from custom_components.automate.const import (
@@ -242,6 +242,14 @@ async def test_options_are_passed_to_the_library_and_reload(hass, config_entry):
     assert new_hub is not hub, "the entry reloaded"
     assert new_hub.api.heartbeatinterval == 60
     assert new_hub.api.signal_poll_interval == 30
+
+    # Below the library's floor (but not 0) is refused by the schema
+    result = await hass.config_entries.options.async_init(config_entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_POLL_INTERVAL: 60, CONF_SIGNAL_POLL_INTERVAL: 5}
+        )
+    hass.config_entries.options.async_abort(result["flow_id"])
 
     # And back off again, no code change: 0 means the cached hub value is used
     result = await hass.config_entries.options.async_init(config_entry.entry_id)
