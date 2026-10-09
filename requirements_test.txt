@@ -1,0 +1,6 @@
+# Test harness. pytest-homeassistant-custom-component pins the Home Assistant
+# version the suite runs against: 0.13.364 pins 2026.9.1, the deployment target.
+# aiopulse2 is deliberately NOT listed: it is vendored under
+# custom_components/automate/vendor/, so the tests run against the copy that ships.
+pytest-homeassistant-custom-component==0.13.364
+websockets>=13

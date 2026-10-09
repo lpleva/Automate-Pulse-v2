@@ -1,0 +1,201 @@
+"""Vendored aiopulse2: the serial (port 1487) side, against a fake hub on 127.0.0.1."""
+
+import asyncio
+
+import pytest
+
+from custom_components.automate.vendor.aiopulse2 import devices
+from custom_components.automate.vendor.aiopulse2.devices import Hub
+
+from .conftest import shadow_message
+
+# The HA test plugin blocks sockets; these tests talk to a fake hub on 127.0.0.1.
+pytestmark = pytest.mark.usefixtures("socket_enabled")
+
+
+class FakeSerialHub:
+    """A TCP server speaking the hub's serial protocol, just enough for the tests."""
+
+    def __init__(self, names=None, signal="54", answer=True):
+        self.names = names or {}
+        self.signal = signal
+        self.answer = answer
+        self.received = []
+        self.connections = 0
+        self.server = None
+
+    async def start(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        return self.server.sockets[0].getsockname()[1]
+
+    async def stop(self):
+        self.server.close()
+        await self.server.wait_closed()
+
+    async def _handle(self, reader, writer):
+        self.connections += 1
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(reader.readuntil(b";"), 2)
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                    break
+                cmd = data.decode()
+                self.received.append(cmd)
+                if not self.answer:
+                    continue
+                rid = cmd[1:4]
+                if cmd.endswith("NAME?;"):
+                    if rid in self.names:
+                        writer.write(f"!{rid}NAME{self.names[rid]};".encode())
+                elif cmd.endswith("r?;"):
+                    writer.write(f"!{rid}r050b000,R{self.signal};".encode())
+                await writer.drain()
+        finally:
+            writer.close()
+
+
+@pytest.fixture(autouse=True)
+def fast_serial_retries(monkeypatch):
+    monkeypatch.setattr(devices, "SERIAL_READ_TIMEOUT", 0.2)
+    monkeypatch.setattr(devices, "SERIAL_RETRY_MIN", 0.05)
+    monkeypatch.setattr(devices, "SERIAL_RETRY_MAX", 0.1)
+    monkeypatch.setattr(devices, "SIGNAL_POLL_REPLY_TIMEOUT", 0.5)
+
+
+async def _hub_with_fake(fake, **kwargs):
+    port = await fake.start()
+    hub = Hub("127.0.0.1", serial_port=port, **kwargs)
+    hub.running = True
+    return hub
+
+
+async def test_names_resolved_and_callbacks_released():
+    fake = FakeSerialHub(names={"ABC": "Kitchen", "DEF": "Office"})
+    hub = await _hub_with_fake(fake)
+    hub_updates = []
+    hub.callback_subscribe(lambda h: hub_updates.append(1))
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}, "DEF": {"rs": -70}}))
+        assert hub_updates == [], "hub callbacks are held until names are known"
+        await asyncio.wait_for(hub.rollers_known.wait(), 3)
+        await asyncio.sleep(0)
+        assert hub.rollers["ABC"].name == "Kitchen"
+        assert hub.rollers["DEF"].name == "Office"
+        assert not hub.rollers["ABC"].name_is_placeholder
+        assert hub.unknown_rollers == set()
+        assert len(hub_updates) >= 1
+        await asyncio.wait_for(hub.serial_task, 3)
+        assert hub.serialrunning is False
+        assert fake.connections == 1
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_silent_serial_port_retries_then_falls_back_to_placeholder_names(caplog):
+    """Upstream gave up after one 3 s silence and the integration never created an entity."""
+    fake = FakeSerialHub(answer=False)
+    hub = await _hub_with_fake(fake)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert fake.connections == devices.SERIAL_FALLBACK_ATTEMPTS
+        roller = hub.rollers["ABC"]
+        assert roller.name == "Shade ABC"
+        assert roller.name_is_placeholder is True
+        assert hub.rollers_known.is_set()
+        assert hub.unknown_rollers == set()
+        assert "using 'Shade ABC'" in caplog.text
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_placeholder_names_are_requeued_and_replaced_when_the_port_answers():
+    fake = FakeSerialHub(answer=False)
+    hub = await _hub_with_fake(fake)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert hub.rollers["ABC"].name == "Shade ABC"
+        fake.answer = True
+        fake.names["ABC"] = "Kitchen"
+        hub.requeue_placeholder_names()  # what the hourly heartbeat tick does
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert hub.rollers["ABC"].name == "Kitchen"
+        assert hub.rollers["ABC"].name_is_placeholder is False
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_refused_connection_backs_off_and_falls_back(caplog):
+    fake = FakeSerialHub()
+    port = await fake.start()
+    await fake.stop()  # nothing listens on that port now
+    hub = Hub("127.0.0.1", serial_port=port)
+    hub.running = True
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 5)
+        assert hub.rollers["ABC"].name == "Shade ABC"
+        assert "unavailable" in caplog.text
+    finally:
+        await hub._cancel_background_tasks()
+
+
+async def test_signal_sweep_queries_one_shade_at_a_time_in_dbm():
+    fake = FakeSerialHub(names={"ABC": "Kitchen", "DEF": "Office"}, signal="54")
+    hub = await _hub_with_fake(fake, signal_poll_interval=10)
+    hub.signal_poll_interval = 0.1  # below the floor on purpose, tests only
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}, "DEF": {"rs": -70}}))
+        await asyncio.wait_for(hub.rollers_known.wait(), 3)
+        hub.signal_task = asyncio.create_task(hub.signal_sweep())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if hub.rollers["ABC"].serial_signal_at and hub.rollers["DEF"].serial_signal_at:
+                break
+        assert hub.rollers["ABC"].signal == -92
+        assert hub.rollers["DEF"].signal == -92
+        queries = [c for c in fake.received if c.endswith("r?;")]
+        assert queries[:2] == ["!ABCr?;", "!DEFr?;"], "round-robin, one shade per tick"
+        # The cached websocket value must not undo the live reading
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}, "DEF": {"rs": -70}}))
+        assert hub.rollers["ABC"].signal == -92
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_sweep_waits_while_names_are_still_being_looked_up():
+    fake = FakeSerialHub(names={})  # never answers names
+    hub = await _hub_with_fake(fake, signal_poll_interval=10)
+    hub.signal_poll_interval = 0.05
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        hub.signal_task = asyncio.create_task(hub.signal_sweep())
+        await asyncio.sleep(0.3)
+        assert not [c for c in fake.received if c.endswith("r?;")]
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+async def test_serial_sessions_never_overlap():
+    """Name lookup and sweep share one port: the lock serialises them."""
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _hub_with_fake(fake)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.rollers_known.wait(), 3)
+        await asyncio.wait_for(hub.serial_task, 3)
+        await asyncio.gather(
+            hub._serial_query_position("ABC"), hub._serial_query_position("ABC")
+        )
+        assert fake.connections == 3
+        assert hub.rollers["ABC"].signal == -92
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
