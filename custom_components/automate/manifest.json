@@ -1,13 +1,20 @@
 {
   "domain": "automate",
   "name": "Automate Pulse Hub v2",
-  "codeowners": ["@sillyfrog", "@lpleva"],
+  "codeowners": [
+    "@sillyfrog",
+    "@lpleva"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/sillyfrog/Automate-Pulse-v2",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/sillyfrog/Automate-Pulse-v2/issues",
-  "loggers": ["custom_components.automate"],
-  "requirements": ["websockets>=13"],
-  "version": "1.2.0"
+  "loggers": [
+    "custom_components.automate"
+  ],
+  "requirements": [
+    "websockets>=13"
+  ],
+  "version": "1.2.1"
 }
