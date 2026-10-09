@@ -3,13 +3,13 @@
 # Note, these are in the same file to prevent circular imports
 import asyncio
 import functools
+import inspect
 import json
 import logging
 import ssl
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import async_timeout
 import websockets.exceptions
 from websockets.protocol import State
 
@@ -30,16 +30,122 @@ BATTERY_8V_MAX_VOLTAGE = 9.0
 # Fixes https://github.com/sillyfrog/Automate-Pulse-v2/issues/15
 ONLINE_MIN_VERSION = 0
 
+# How often the hub is asked for its shadow (the full state of every shade), in
+# seconds. Upstream hard-coded 2; the hub serialises the whole document for every
+# request, so this is the single biggest load this library puts on it.
+DEFAULT_POLL_INTERVAL = 10
+MIN_POLL_INTERVAL = 2
+
+# Websocket reconnect: first retry after RECONNECT_MIN seconds, doubling to
+# RECONNECT_MAX. Reset on a successful connection.
+RECONNECT_MIN = 5
+RECONNECT_MAX = 60
+# How long a command (move, stop) waits for the websocket to come back before it
+# fails with NotConnectedException instead of hanging the caller.
+SEND_HANDSHAKE_TIMEOUT = 10
+
+# The serial (port 1487) name lookup: wait this long for a reply, retry with a
+# doubling back-off, and after SERIAL_FALLBACK_ATTEMPTS failed attempts give each
+# still-unnamed roller a placeholder name so callers are not blocked forever.
+SERIAL_PORT = 1487
+SERIAL_READ_TIMEOUT = 3
+SERIAL_RETRY_MIN = 10
+SERIAL_RETRY_MAX = 300
+SERIAL_FALLBACK_ATTEMPTS = 3
+
+# The websocket "rs" field is dBm. The serial protocol's ",R<hex>" field is a raw
+# radio register; this is the conversion to dBm.
+SERIAL_SIGNAL_OFFSET = 134
+
+# Live signal sweep. On the Pulse Pro the websocket "rs" is the hub's CACHED last
+# reading and does not refresh by itself; the serial "!<id>r?;" query polls the
+# motor over RF and returns a fresh ",R<hex>" every time (a few seconds each).
+# The sweep asks ONE shade every signal_poll_interval seconds, round-robin, so at
+# 30 s with eight shades each one refreshes about every four minutes. OFF by
+# default (0): a consumer opts in, and with it off the cached "rs" is used as is.
+DEFAULT_SIGNAL_POLL_INTERVAL = 0
+MIN_SIGNAL_POLL_INTERVAL = 10
+SIGNAL_POLL_REPLY_TIMEOUT = 8
+# A serial reading older than this many sweep rounds is stale, and the websocket's
+# cached "rs" is used again until the sweep recovers.
+SIGNAL_STALE_ROUNDS = 3
+
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+# The hub presents a self-signed certificate, so it cannot be verified against a CA.
+# This context is used for exactly one connection: the websocket to the configured
+# hub host (Hub.wsuri). It is never installed as a default and nothing else uses it.
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
+
+
+def serial_signal_to_dbm(signal) -> Optional[float]:
+    """Convert a serial ",R<hex>" signal register to dBm.
+
+    Returns an int when the result is whole, so it compares equal to the websocket
+    "rs" value for the same reading, or None when the input is not a hex byte.
+    """
+    try:
+        raw = int(signal, 16) if isinstance(signal, str) else int(signal)
+    except (TypeError, ValueError):
+        return None
+    dbm = raw / 2 - SERIAL_SIGNAL_OFFSET
+    return int(dbm) if dbm.is_integer() else dbm
+
+
+def next_backoff(current: float, minimum: float, maximum: float) -> float:
+    """Return the delay to use after `current`: doubled, clamped to [minimum, maximum]."""
+    if current <= 0:
+        return minimum
+    return min(max(current * 2, minimum), maximum)
+
+
+def _repair_truncated_json(msg: str):
+    """Parse a hub message, repairing the Pulse Pro's truncation if needed.
+
+    Returns (parsed, truncated_shade_suspect) or (None, False) when the message
+    cannot be parsed. Pulse Pro hubs (firmware 1.1.0 onwards) drop the final
+    closing brace(s) of every shadow response; appending them restores the document.
+    When the cut falls INSIDE a shade's own object (the shades container and at
+    least one shade are both unterminated) the last shade's values may be partial,
+    and the second return value is True so the caller can skip that shade.
+    """
+    try:
+        return json.loads(msg), False
+    except json.JSONDecodeError as e:
+        _LOGGER.debug("Invalid JSON received: %s", e)
+
+    missing_braces = msg.count("{") - msg.count("}")
+    if missing_braces <= 0:
+        return None, False
+    try:
+        parsed = json.loads(msg + "}" * missing_braces)
+    except json.JSONDecodeError:
+        return None, False
+    _LOGGER.debug("Repaired truncated JSON by adding %d closing brace(s)", missing_braces)
+
+    suspect = False
+    shades_at = msg.rfind('"shades"')
+    if shades_at >= 0:
+        tail = msg[shades_at:]
+        open_depth = tail.count("{") - tail.count("}")
+        # depth 1: only the shades container is unterminated, every shade is whole.
+        # depth 2+: a shade's own object was cut, so its last value may be partial.
+        suspect = open_depth >= 2
+    return parsed, suspect
 
 
 class Hub:
     """Representation of an Acmeda Pulse v2 Hub."""
 
     def __init__(
-        self, host: str, delay_callbacks: bool = True, propagate_callbacks: bool = False
+        self,
+        host: str,
+        delay_callbacks: bool = True,
+        propagate_callbacks: bool = False,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        serial_port: int = SERIAL_PORT,
+        signal_poll_interval: float = DEFAULT_SIGNAL_POLL_INTERVAL,
     ):
         """Init the hub.
 
@@ -48,8 +154,16 @@ class Hub:
             inital hub sync is complete, getting details such as the device name
         propagate_callbacks: If True, when there is a change to the hub, all roller
             callbacks are also notified.
+        poll_interval: seconds between shadow requests to the hub (minimum 2).
+        serial_port: the hub's serial-protocol TCP port (1487 on real hubs; a
+            parameter so tests can point it at a local fake).
+        signal_poll_interval: seconds between live serial signal queries, one
+            shade per query round-robin (minimum 10; 0 turns the sweep off).
         """
-        self.loop = asyncio.get_event_loop()
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.get_event_loop()
         self.handshake = asyncio.Event()
         self.delay_callbacks = delay_callbacks
         self.propagate_callbacks = propagate_callbacks
@@ -64,6 +178,7 @@ class Hub:
         self.id = None
         self.host = host
         self.wsuri = "wss://{}:443/rpc".format(self.host)
+        self.serial_port = serial_port
         self.mac_address = None
         self.firmware_ver = None
         self.model = None
@@ -75,12 +190,26 @@ class Hub:
         self.rollers_known = asyncio.Event()
         self.rollers_known.clear()
         self.serialrunning = False
+        self.serial_task: Optional[asyncio.Task] = None
+        self.heartbeat_task: Optional[asyncio.Task] = None
+        self.signal_task: Optional[asyncio.Task] = None
+        # One serial-port session at a time: the name lookup and the signal sweep
+        # share the hub's single port 1487.
+        self.serial_lock = asyncio.Lock()
+        self._sweep_position = 0
         self.sent_details_request = set()
         self.payload_queue = []
+        self.json_failures = 0
 
         self.handshake.clear()
         self.update_callbacks: List[Callable] = []
-        self.heartbeatinterval = 2
+        self.heartbeatinterval = max(float(poll_interval), MIN_POLL_INTERVAL)
+        if signal_poll_interval and signal_poll_interval > 0:
+            self.signal_poll_interval = max(
+                float(signal_poll_interval), MIN_SIGNAL_POLL_INTERVAL
+            )
+        else:
+            self.signal_poll_interval = 0.0
 
     def __str__(self):
         """Returns string representation of the hub."""
@@ -122,16 +251,20 @@ class Hub:
 
         if asyncio.iscoroutine(check_target):
             task = self.loop.create_task(target)  # type: ignore
-        elif asyncio.iscoroutinefunction(check_target):
+        elif inspect.iscoroutinefunction(check_target):
             task = self.loop.create_task(target(*args))
         else:
             task = self.loop.run_in_executor(None, target, *args)  # type: ignore
 
         return task
 
+    def unnamed_rollers(self) -> List[str]:
+        """Ids of rollers that have no name at all yet (not even a placeholder)."""
+        return [rid for rid, roller in self.rollers.items() if roller.name is None]
+
     def notify_callback(self):
         """Tell callback that the hub has been updated."""
-        if self.delay_callbacks and (self.unknown_rollers or len(self.rollers) == 0):
+        if self.delay_callbacks and (self.unnamed_rollers() or len(self.rollers) == 0):
             return
         for callback in self.update_callbacks:
             self.async_add_job(callback, self)
@@ -149,6 +282,7 @@ class Hub:
 
     def response_parse(self, response: str):
         """Decode response."""
+        response = response.strip()
         for name, matcher in const.ALL_RESPONSES.items():
             match = matcher.match(response)
             if match:
@@ -169,18 +303,151 @@ class Hub:
     def handle_device_query_position_response(
         self, id: str, closedpercent: str, tiltpercent: str, signal: str
     ):
-        self.rollers[id].closed_percent = forcetoint(closedpercent)
-        self.rollers[id].tilt_percent = forcetoint(tiltpercent)
-        self.rollers[id].set_signal(signal)
+        roller = self.rollers.get(id)
+        if roller is None:
+            _LOGGER.debug("Serial position response for unknown roller %s", id)
+            return
+        changed = self.applychanges(
+            roller,
+            {
+                "closed_percent": forcetoint(closedpercent),
+                "tilt_percent": forcetoint(tiltpercent),
+            },
+        )
+        changed = roller.set_signal(signal) or changed
+        roller.serial_signal_at = time.monotonic()
+        if changed:
+            roller.notify_callback()
 
     def handle_device_query_name_response(self, id: str, name: str):
-        self.rollers[id].name = name
+        roller = self.rollers.get(id)
+        if roller is None:
+            _LOGGER.debug("Serial name response for unknown roller %s", id)
+            return
+        roller.name = name
+        roller.name_is_placeholder = False
         self.unknown_rollers.discard(id)
-        self.rollers[id].notify_callback()
+        roller.notify_callback()
         if not self.unknown_rollers:
             # The list of unknown_rollers is empty
             self.rollers_known.set()
             self.notify_callback()
+
+    async def _serial_session(self, commands, read_timeout, done=None) -> None:
+        """One serial-port session: send `commands`, parse replies until quiet.
+
+        Stops early when `done()` returns True. Holds serial_lock so the name
+        lookup and the signal sweep never open port 1487 at the same time.
+        """
+        async with self.serial_lock:
+            reader, writer = await asyncio.open_connection(
+                self.host, port=self.serial_port
+            )
+            try:
+                for buf in commands:
+                    writer.write(buf.encode())
+                await writer.drain()
+                while True:
+                    try:
+                        async with asyncio.timeout(read_timeout):
+                            response = await reader.readuntil(b";")
+                    except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                        # Quiet for read_timeout, or the hub closed: session over
+                        break
+                    _LOGGER.debug("recv < %s", response)
+                    self.response_parse(response.decode(errors="replace"))
+                    if done is not None and done():
+                        break
+            finally:
+                writer.close()
+
+    async def _serial_query_names(self, rollerids) -> None:
+        """Ask the serial port for each roller's name, read until quiet."""
+        await self._serial_session(
+            [const.DEVICE_QUERY_NAME.format(id=rollerid) for rollerid in rollerids],
+            SERIAL_READ_TIMEOUT,
+        )
+
+    async def _serial_query_position(self, rollerid: str) -> None:
+        """Ask the motor, live over RF, for its position and signal."""
+        roller = self.rollers[rollerid]
+        before = roller.serial_signal_at
+        await self._serial_session(
+            [const.DEVICE_QUERY_POSITION.format(id=rollerid)],
+            SIGNAL_POLL_REPLY_TIMEOUT,
+            done=lambda: roller.serial_signal_at != before,
+        )
+
+    def signal_stale_after(self) -> float:
+        """Seconds after which a live serial reading no longer overrides "rs"."""
+        rounds = max(len(self.rollers), 1) * self.signal_poll_interval
+        return max(SIGNAL_STALE_ROUNDS * rounds, 10 * MIN_SIGNAL_POLL_INTERVAL)
+
+    def use_ws_signal(self, roller) -> bool:
+        """True when the websocket's cached "rs" should be applied to this roller.
+
+        The live serial reading wins while the sweep is on and keeping it fresh;
+        the cached value is used again if the sweep is off or has fallen behind.
+        """
+        if self.signal_poll_interval <= 0 or roller.serial_signal_at is None:
+            return True
+        return time.monotonic() - roller.serial_signal_at > self.signal_stale_after()
+
+    async def signal_sweep(self):
+        """Query one shade's live signal every signal_poll_interval seconds."""
+        backoff = 0.0
+        while self.running and self.signal_poll_interval > 0:
+            await asyncio.sleep(max(backoff, self.signal_poll_interval))
+            if not self.running:
+                break
+            named = [rid for rid, r in self.rollers.items() if r.name is not None]
+            if not named or self.unknown_rollers:
+                # Nothing to sweep yet, or the name lookup needs the port first
+                continue
+            self._sweep_position %= len(named)
+            rollerid = named[self._sweep_position]
+            self._sweep_position += 1
+            try:
+                await self._serial_query_position(rollerid)
+                backoff = 0.0
+            except asyncio.CancelledError:
+                raise
+            except (OSError, asyncio.TimeoutError) as e:
+                if self.lastserialerror != str(e):
+                    _LOGGER.warning(
+                        "%s: serial port %d unavailable for the signal sweep: %s",
+                        self.host,
+                        self.serial_port,
+                        e,
+                    )
+                    self.lastserialerror = str(e)
+                backoff = next_backoff(backoff, SERIAL_RETRY_MIN, SERIAL_RETRY_MAX)
+            except Exception as e:  # keep sweeping; one bad reply is not fatal
+                _LOGGER.debug("%s: signal sweep error on %s: %s", self.host, rollerid, e)
+
+    def _apply_fallback_names(self) -> None:
+        """Name every still-unknown roller after its id so callers can proceed.
+
+        The real name replaces it when the serial port answers later
+        (handle_device_query_name_response clears the placeholder flag).
+        """
+        for rollerid in list(self.unknown_rollers):
+            roller = self.rollers.get(rollerid)
+            if roller is not None and roller.name is None:
+                roller.name = f"Shade {rollerid}"
+                roller.name_is_placeholder = True
+                _LOGGER.warning(
+                    "%s: no name from the hub's serial port for roller %s after %d "
+                    "attempts; using %r until it answers",
+                    self.host,
+                    rollerid,
+                    SERIAL_FALLBACK_ATTEMPTS,
+                    roller.name,
+                )
+                roller.notify_callback()
+        self.unknown_rollers.clear()
+        self.rollers_known.set()
+        self.notify_callback()
 
     async def serialrunner(self):
         """The running to get all required information from the hub
@@ -188,31 +455,45 @@ class Hub:
         This will exit when complete.
         """
         self.serialrunning = True
+        attempts = 0
+        delay = 0.0
         try:
-            while self.unknown_rollers:
+            while self.unknown_rollers and self.running:
                 self.rollers_known.clear()  # We have some unknown rollers
-                reader, writer = await asyncio.open_connection(self.host, port=1487)
-                # Send off a request for all of the unknown rollers
-                for rollerid in self.unknown_rollers:
-                    buf = const.DEVICE_QUERY_NAME.format(id=rollerid)
-                    writer.write(buf.encode())
-                while True:
-                    async with async_timeout.timeout(3):
-                        response = await reader.readuntil(b";")
-                    if len(response) > 0:
-                        _LOGGER.debug("recv < %s", response)
-                        self.response_parse(response.decode())
-                    else:
-                        break
-                # Nothing has happened for > 30 seconds, disconnet
-                writer.close()
-                # Sleep 10 seconds to wait for things to settle down before maybe trying again
-                await asyncio.sleep(10)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+                try:
+                    await self._serial_query_names(list(self.unknown_rollers))
+                except (OSError, asyncio.TimeoutError) as e:
+                    # Connection refused / no route / handshake timeout
+                    if self.lastserialerror != str(e):
+                        _LOGGER.warning(
+                            "%s: serial port %d unavailable: %s",
+                            self.host,
+                            self.serial_port,
+                            e,
+                        )
+                        self.lastserialerror = str(e)
+                if not self.unknown_rollers:
+                    self.serialok = True
+                    self.lastserialerror = None
+                    break
+                attempts += 1
+                if attempts >= SERIAL_FALLBACK_ATTEMPTS and self.unnamed_rollers():
+                    self._apply_fallback_names()
+                    break
+                delay = next_backoff(delay, SERIAL_RETRY_MIN, SERIAL_RETRY_MAX)
+                _LOGGER.debug(
+                    "%s: %d roller(s) still unnamed, retrying serial in %ss",
+                    self.host,
+                    len(self.unknown_rollers),
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
             pass
         except Exception as e:
             _LOGGER.info("Error in serial running: %s", e)
-        self.serialrunning = False
+        finally:
+            self.serialrunning = False
 
     async def runserial(self):
         """Runs a 'serial' connection to the hub to get additional information"""
@@ -220,7 +501,16 @@ class Hub:
             # Already running, don't start again
             return
         self.serialrunning = True
-        asyncio.create_task(self.serialrunner())
+        self.serial_task = asyncio.create_task(self.serialrunner())
+
+    def requeue_placeholder_names(self) -> None:
+        """Ask the serial port again for rollers that only have a placeholder name."""
+        for rollerid, roller in self.rollers.items():
+            if roller.name_is_placeholder:
+                self.unknown_rollers.add(rollerid)
+        if self.unknown_rollers and self.running and not self.serialrunning:
+            self.serialrunning = True
+            self.serial_task = asyncio.create_task(self.serialrunner())
 
     async def send_payload(self, jscommand: Dict):
         """Send payload to the hub
@@ -229,9 +519,14 @@ class Hub:
         """
         if not self.running:
             raise errors.NotRunningException
-        await self.handshake.wait()
+        try:
+            async with asyncio.timeout(SEND_HANDSHAKE_TIMEOUT):
+                await self.handshake.wait()
+        except asyncio.TimeoutError:
+            raise errors.NotConnectedException from None
         _LOGGER.debug("Sending payload: %s", jscommand)
-        await self.sendws(jscommand)
+        if not await self.sendws(jscommand):
+            raise errors.NotConnectedException
 
     async def sendws(self, jscommand: Dict) -> bool:
         """Send jscommand over the websocket
@@ -241,7 +536,7 @@ class Hub:
         """
         if self.ws:
             try:
-                async with async_timeout.timeout(10):
+                async with asyncio.timeout(10):
                     await self.ws.send(json.dumps(jscommand))
                 return True
             except (
@@ -253,6 +548,12 @@ class Hub:
         return False
 
     async def heartbeat(self):
+        """Poll the hub's shadow every heartbeatinterval seconds.
+
+        The hub does not push state over the websocket, so this is how every
+        position, battery and signal reading arrives. Queued payloads (the
+        once-an-hour details query) go out one per tick ahead of the poll.
+        """
         reset_request_counter = 3600 / self.heartbeatinterval
         while self.running:
             if self.ws and self.ws.state == State.OPEN and self.handshake.is_set():
@@ -268,8 +569,10 @@ class Hub:
             reset_request_counter -= 1
             if reset_request_counter <= 0:
                 # About once an hour allow a request to be made to the hub to get the
-                # rollers details again
+                # rollers details again, and retry any names the serial port never
+                # supplied.
                 self.sent_details_request.clear()
+                self.requeue_placeholder_names()
                 reset_request_counter = 3600 / self.heartbeatinterval
 
     def applychanges(self, obj: Any, newvalues: Dict[str, Any]) -> bool:
@@ -284,32 +587,82 @@ class Hub:
                 updated = True
         return updated
 
-    async def wsconsumer(self, msg: str):
-        try:
-            jsmsg = json.loads(msg)
-        except json.JSONDecodeError as e:
-            _LOGGER.debug("Invalid JSON received: %s", e)
+    def _roller_newvals(self, rollerid: str, roller: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate one shade's shadow entry into Roller attribute values.
 
-            # Check if JSON is missing closing braces
-            # this fixes an issue with the output for Pulse Pro Hubs v1.1.0
-            if msg.count("{") > msg.count("}"):
-                missing_braces = msg.count("{") - msg.count("}")
-                fixed_msg = msg + "}" * missing_braces
-                _LOGGER.debug(
-                    "Attempting to fix JSON by adding %d missing closing braces",
-                    missing_braces,
+        Only keys the hub actually sent are translated: a missing key means "no
+        news", never "offline" or "closed". A truncated Pulse Pro message can drop
+        keys from the last shade, and defaults here would make that shade flap.
+        """
+        newvals: Dict[str, Any] = {}
+        if "rs" in roller and self.use_ws_signal(self.rollers[rollerid]):
+            newvals["signal"] = roller["rs"]
+        if "is" in roller:
+            newvals["moving"] = not roller["is"]
+        if "ol" in roller:
+            newvals["online"] = bool(roller["ol"])
+        if roller.get("mp") is not None:
+            try:
+                newvals["closed_percent"] = int(roller["mp"])
+            except (TypeError, ValueError):
+                _LOGGER.debug("Roller %s: unusable position %r", rollerid, roller["mp"])
+        if "vo" not in roller:
+            # The voltage and version key is missing, request more details if
+            # not already sent. If this request is not made, it will typically
+            # be sent through with in about 20 minutes
+            if rollerid not in self.sent_details_request:
+                self.payload_queue.append(
+                    {
+                        "method": "shadow",
+                        "args": {
+                            "desired": {"shades": {rollerid: {"query": True}}},
+                            "timeStamp": time.time(),
+                        },
+                    }
                 )
-                try:
-                    jsmsg = json.loads(fixed_msg)
-                    _LOGGER.debug("Successfully fixed truncated JSON")
-                except json.JSONDecodeError:
-                    _LOGGER.error("Could not fix JSON even after adding missing braces")
-                    return
-            else:
-                return
+                self.sent_details_request.add(rollerid)
+        else:
+            batteryinfo = const.WS_ROLLER_VOLTAGE.match(str(roller["vo"]))
+            if batteryinfo:
+                newvals["battery"] = float(batteryinfo.group("voltage"))
+                newvals["devicetypeshort"] = batteryinfo.group("type")
+                newvals["devicetype"] = const.TYPES.get(
+                    batteryinfo.group("type"),
+                    f"unknown {batteryinfo.group('type')}",
+                )
+                newvals["version"] = batteryinfo.group("version")
 
-        if "result" not in jsmsg or "reported" not in jsmsg["result"]:
-            _LOGGER.info("Got unknown WS response: %s", msg)
+        try:
+            version = int(
+                newvals.get("version") or forcetoint(self.rollers[rollerid].version)
+            )
+            if version < ONLINE_MIN_VERSION:
+                newvals["online"] = True
+                newvals["closed_percent"] = 50
+        except Exception:
+            pass
+        return newvals
+
+    async def wsconsumer(self, msg: str):
+        jsmsg, truncated_shade_suspect = _repair_truncated_json(msg)
+        if jsmsg is None:
+            self.json_failures += 1
+            if self.json_failures == 1:
+                _LOGGER.warning(
+                    "%s: could not parse a hub message even after repairing "
+                    "truncation; further occurrences are logged at debug level",
+                    self.host,
+                )
+            else:
+                _LOGGER.debug("%s: unparseable hub message dropped", self.host)
+            return
+
+        if not isinstance(jsmsg, dict) or not isinstance(jsmsg.get("result"), dict):
+            _LOGGER.debug("Got unknown WS response: %s", msg)
+            return
+        data = jsmsg["result"].get("reported")
+        if not isinstance(data, dict):
+            _LOGGER.debug("Got unknown WS response: %s", msg)
             return
         if not self.connected:
             self.connected = True
@@ -317,78 +670,67 @@ class Hub:
         if self.lasterrorlog is not None:
             _LOGGER.info("Connected to %s", self.host)
             self.lasterrorlog = None
-        data = jsmsg["result"]["reported"]
         _LOGGER.debug("Got payload: %s", data)
         # Determine model from mfi field or Matter vendor/product ID mapping
         # workaround for Pulse Pro Hub
-        model = data.get("mfi", {}).get("model")
-        if not model and "matter" in data:
-            matter_info = data["matter"]
+        mfi = data.get("mfi")
+        model = mfi.get("model") if isinstance(mfi, dict) else None
+        matter_info = data.get("matter")
+        if not model and isinstance(matter_info, dict):
             vendor_id = matter_info.get("vendorID")
             product_id = matter_info.get("productID")
             if vendor_id and product_id:
                 model = const.MATTER_MODEL_MAPPING.get((vendor_id, product_id))
+        firmware = data.get("firmware")
 
         newvals = {
             "name": data.get("name"),
             "id": data.get("hubId"),
             "mac_address": data.get("mac"),
-            "firmware_ver": data.get("firmware", {}).get("version"),
+            "firmware_ver": firmware.get("version") if isinstance(firmware, dict) else None,
             "model": model,
         }
         hubchanges = self.applychanges(self, newvals)
 
-        for rollerid, roller in data["shades"].items():
+        shades = data.get("shades")
+        if not isinstance(shades, dict):
+            _LOGGER.debug("%s: shadow without a shades object", self.host)
+            if hubchanges:
+                self.notify_callback()
+            return
+
+        shade_items = list(shades.items())
+        if truncated_shade_suspect and shade_items:
+            skipped_id, _ = shade_items.pop()
+            _LOGGER.debug(
+                "%s: shade %s was cut off in a truncated message, skipped this poll",
+                self.host,
+                skipped_id,
+            )
+
+        for rollerid, roller in shade_items:
+            if not isinstance(roller, dict):
+                continue
             if rollerid not in self.rollers:
                 self.rollers[rollerid] = Roller(self, rollerid)
                 self.unknown_rollers.add(rollerid)
                 await self.runserial()
                 hubchanges = True
 
-            newvals = {
-                "signal": roller.get("rs"),
-                "moving": not roller.get("is", True),
-                "online": roller.get("ol", False),
-                "closed_percent": int(roller.get("mp", 100)),
-            }
-            if "vo" not in roller:
-                # The voltage and version key is missing, request more details if
-                # not already sent. If this request is not made, it will typically
-                # be sent through with in about 20 minutes
-                if rollerid not in self.sent_details_request:
-                    self.payload_queue.append(
-                        {
-                            "method": "shadow",
-                            "args": {
-                                "desired": {"shades": {rollerid: {"query": True}}},
-                                "timeStamp": time.time(),
-                            },
-                        }
-                    )
-                    self.sent_details_request.add(rollerid)
-            else:
-                batteryinfo = const.WS_ROLLER_VOLTAGE.match(roller["vo"])
-                if batteryinfo:
-                    newvals["battery"] = float(batteryinfo.group("voltage"))
-                    newvals["devicetypeshort"] = batteryinfo.group("type")
-                    newvals["devicetype"] = const.TYPES.get(
-                        batteryinfo.group("type"),
-                        f"unknown {batteryinfo.group('type')}",
-                    )
-                    newvals["version"] = batteryinfo.group("version")
-
             try:
-                version = int(
-                    newvals.get("version") or forcetoint(self.rollers[rollerid].version)
-                )
-                if version < ONLINE_MIN_VERSION:
-                    newvals["online"] = True
-                    newvals["closed_percent"] = 50
-            except Exception:
-                pass
+                newvals = self._roller_newvals(rollerid, roller)
+            except Exception as e:  # one bad shade must not drop the whole message
+                _LOGGER.debug("Roller %s: could not read shadow entry: %s", rollerid, e)
+                continue
 
-            if self.applychanges(self.rollers[rollerid], newvals):
-                self.rollers[rollerid].notify_callback()
+            current = self.rollers[rollerid]
+            if "devicetypeshort" in newvals and current.devicetypeshort is None:
+                # First time we learn what kind of motor this is (battery or not):
+                # a hub-level change, so consumers can create the entities that
+                # depend on it.
+                hubchanges = True
+            if self.applychanges(current, newvals):
+                current.notify_callback()
 
         if hubchanges:
             self.notify_callback()
@@ -403,25 +745,61 @@ class Hub:
             return
         self.running = True
 
-        asyncio.create_task(self.heartbeat())
-        while self.running:
-            try:
-                async with websockets.connect(self.wsuri, ssl=ssl_context) as websocket:
-                    self.ws = websocket
-                    self.handshake.set()
-                    async for message in websocket:
-                        await self.wsconsumer(message)
-            except Exception as e:
-                self.ws = None
-                if self.running and self.lasterrorlog != errors.CannotConnectException:
-                    _LOGGER.warning("Websocket Connection closed: %s", e)
-                    self.lasterrorlog = errors.CannotConnectException
-                self.connected = False
-                self.notify_callback()
-                if self.running:
-                    await asyncio.sleep(10)
+        self.heartbeat_task = asyncio.create_task(self.heartbeat())
+        if self.signal_poll_interval > 0:
+            self.signal_task = asyncio.create_task(self.signal_sweep())
+        retry_delay = 0.0
+        try:
+            while self.running:
+                try:
+                    async with websockets.connect(self.wsuri, ssl=ssl_context) as websocket:
+                        self.ws = websocket
+                        self.handshake.set()
+                        self.json_failures = 0
+                        retry_delay = 0.0
+                        async for message in websocket:
+                            await self.wsconsumer(message)
+                except Exception as e:
+                    self.ws = None
+                    if self.running and self.lasterrorlog != errors.CannotConnectException:
+                        _LOGGER.warning("Websocket Connection closed: %s", e)
+                        self.lasterrorlog = errors.CannotConnectException
+                    self.connected = False
+                    self.handshake.clear()
+                    self.notify_callback()
+                    if self.running:
+                        retry_delay = next_backoff(retry_delay, RECONNECT_MIN, RECONNECT_MAX)
+                        _LOGGER.debug("%s: reconnecting in %ss", self.host, retry_delay)
+                        await asyncio.sleep(retry_delay)
+                else:
+                    # Clean close by the hub: reconnect promptly
+                    self.ws = None
+                    self.connected = False
+                    self.handshake.clear()
+                    self.notify_callback()
+                    if self.running:
+                        retry_delay = next_backoff(retry_delay, RECONNECT_MIN, RECONNECT_MAX)
+                        await asyncio.sleep(retry_delay)
+        finally:
+            await self._cancel_background_tasks()
 
         _LOGGER.debug("%s: Stopped", self.host)
+
+    async def _cancel_background_tasks(self):
+        """Cancel the heartbeat and serial tasks and wait for them."""
+        tasks = [
+            t
+            for t in (self.heartbeat_task, self.serial_task, self.signal_task)
+            if t and not t.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.heartbeat_task = None
+        self.serial_task = None
+        self.signal_task = None
+        self.serialrunning = False
 
     async def test(self, update_devices=False):
         """Connect to the hub once, and check we get a valid response
@@ -432,22 +810,28 @@ class Hub:
         if connection succeeded.
         """
         self.running = True
-        async with websockets.connect(self.wsuri, ssl=ssl_context) as websocket:
-            self.ws = websocket
-            asyncio.create_task(self.heartbeat())
-            self.handshake.set()
-            async for message in websocket:
-                await self.wsconsumer(message)
-                if self.connected:
-                    self.running = False
-                    break
+        try:
+            async with websockets.connect(self.wsuri, ssl=ssl_context) as websocket:
+                self.ws = websocket
+                self.heartbeat_task = asyncio.create_task(self.heartbeat())
+                self.handshake.set()
+                async for message in websocket:
+                    await self.wsconsumer(message)
+                    if self.connected:
+                        break
+                    else:
+                        raise errors.InvalidResponseException
                 else:
                     raise errors.InvalidResponseException
-        # Now connected, wait for the initial device listing to be populated
-        if update_devices:
-            await self.rollers_known.wait()
-        self.ws = None
-        self.connected = False
+            # Now connected, wait for the initial device listing to be populated
+            if update_devices:
+                await self.rollers_known.wait()
+        finally:
+            self.running = False
+            self.ws = None
+            self.connected = False
+            self.handshake.clear()
+            await self._cancel_background_tasks()
         return True
 
     async def stop(self):
@@ -468,6 +852,7 @@ class Roller:
         self.hub = hub
         self.id = roller_id
         self.name = None
+        self.name_is_placeholder = False
         self.devicetypeshort = None
         self.devicetype = None
         self.battery = None
@@ -475,6 +860,9 @@ class Roller:
         self.closed_percent = None
         self.tilt_percent = None
         self.signal = None
+        # time.monotonic() of the last LIVE signal reading from the serial port;
+        # None until the sweep has queried this roller.
+        self.serial_signal_at = None
         self.version = None
         self._moving = False
         self.action = MovingAction.stopped
@@ -566,11 +954,22 @@ class Roller:
         for callback in self.update_callbacks:
             self.hub.async_add_job(callback, self)
 
-    def set_signal(self, signal: str):
-        """Sets the signal as an int from a hex value"""
-        if type(signal) is not int:
-            signal = int(signal, 16)
-        self.signal = signal
+    def set_signal(self, signal) -> bool:
+        """Set the signal, in dBm, from a serial ",R<hex>" register value.
+
+        The websocket reports dBm directly ("rs"); the serial protocol reports a
+        raw register that must be converted, otherwise the same reading flips
+        between -82 and 104 depending on which path delivered it last.
+        Returns True when the stored value changed.
+        """
+        dbm = serial_signal_to_dbm(signal)
+        if dbm is None:
+            _LOGGER.debug("Roller %s: unusable serial signal %r", self.id, signal)
+            return False
+        if self.signal == dbm:
+            return False
+        self.signal = dbm
+        return True
 
     async def move_to(self, percent: int):
         """Send command to move the roller to a percentage closed."""
@@ -626,3 +1025,4 @@ def forcetoint(src) -> int:
         return int(src)
     except Exception:
         return 0
+

@@ -6,6 +6,7 @@ from .const import MovingAction, UpdateType
 from .devices import Hub, Roller
 from .errors import (
     CannotConnectException,
+    HubBaseException,
     InvalidResponseException,
     NotConnectedException,
     NotRunningException,
@@ -14,6 +15,7 @@ from .errors import (
 __all__ = [
     "Hub",
     "Roller",
+    "HubBaseException",
     "CannotConnectException",
     "NotConnectedException",
     "NotRunningException",
@@ -21,6 +23,6 @@ __all__ = [
     "UpdateType",
     "MovingAction",
 ]
-__version__ = "0.10.0"
+__version__ = "1.0.0+lpleva"
 
 _LOGGER = logging.getLogger(__name__)
