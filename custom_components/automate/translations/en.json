@@ -15,5 +15,20 @@
                 }
             }
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Polling",
+                "data": {
+                    "poll_interval": "Hub state poll interval (seconds)",
+                    "signal_poll_interval": "Live signal query interval (seconds, 0 = off)"
+                },
+                "data_description": {
+                    "poll_interval": "How often the hub is asked for the state of every shade. Each request makes the hub serialise its whole state document; 2 is the upstream default, 10 or more is kinder to the hub.",
+                    "signal_poll_interval": "How often ONE shade is asked, over the hub's serial port, for a live radio signal reading (shades take turns). The hub's own cached value does not refresh on its own on Pulse Pro hubs."
+                }
+            }
+        }
     }
 }

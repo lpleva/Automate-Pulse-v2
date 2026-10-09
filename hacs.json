@@ -1,8 +1,5 @@
 {
   "name": "Rollease Acmeda Automate Pulse Hub v2",
   "render_readme": true,
-  "iot_class": [
-    "Local Polling",
-    "Local Push"
-  ]
+  "homeassistant": "2026.9.0"
 }

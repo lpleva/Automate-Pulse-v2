@@ -5,7 +5,12 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import ATTR_VOLTAGE, PERCENTAGE, SIGNAL_STRENGTH_DECIBELS
+from homeassistant.const import (
+    ATTR_VOLTAGE,
+    PERCENTAGE,
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
+)
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
@@ -45,17 +50,12 @@ class AutomateBattery(AutomateBase, SensorEntity):
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "Battery"
 
     @property
-    def name(self):
-        """Return the name of roller Battery."""
-        if super().name is None:
-            return None
-        return f"{super().name} Battery"
-
-    @property
-    def state(self):
-        """Return the state of the device battery."""
+    def native_value(self):
+        """Return the battery percentage."""
         return self.roller.battery_percent
 
     @property
@@ -66,13 +66,7 @@ class AutomateBattery(AutomateBase, SensorEntity):
     @property
     def extra_state_attributes(self):
         """Additional information about the battery state."""
-        attrs = super().extra_state_attributes
-        if attrs is None:
-            attrs = {}
-        else:
-            attrs = attrs.copy()
-        attrs[ATTR_VOLTAGE] = self.roller.battery
-        return attrs
+        return {ATTR_VOLTAGE: self.roller.battery}
 
     def include_entity(self) -> bool:
         """Return True if roller has a battery."""
@@ -80,23 +74,21 @@ class AutomateBattery(AutomateBase, SensorEntity):
 
 
 class AutomateSignal(AutomateBase, SensorEntity):
-    """Representation of a Automate cover WiFi signal sensor."""
+    """Representation of a Automate cover radio signal sensor.
+
+    The value is dBm whichever path delivered it: the websocket reports dBm, and
+    the library converts the serial protocol's raw register before storing it.
+    """
 
     _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS
-    _attr_entity_registry_enabled_default = False
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "Signal"
 
     @property
-    def name(self):
-        """Return the name of roller."""
-        if super().name is None:
-            return None
-        return f"{super().name} Signal"
-
-    @property
-    def state(self):
-        """Return the state of the device signal strength."""
+    def native_value(self):
+        """Return the signal strength in dBm."""
         return self.roller.signal
 
     @property
