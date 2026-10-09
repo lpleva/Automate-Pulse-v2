@@ -129,7 +129,7 @@ the serial lock for more than 10 s.
 
 ### Testing
 
-- 53 tests under `test/`: the vendored library against fake sockets (a scripted
+- 60 tests under `test/`: the vendored library against fake sockets (a scripted
   websocket, a fake serial hub on 127.0.0.1) and the integration on Home
   Assistant 2026.9.1 (`pytest-homeassistant-custom-component` 0.13.364): config
   flow, options flow and reload, entities, devices and `via_device_id`,
