@@ -108,9 +108,13 @@ not refresh on its own, while the serial query `!<id>r?;` polls the motor live
 over RF and returns a fresh reading every time (a few seconds each). The new
 option "Live signal query interval" asks ONE shade per interval, round-robin
 (at 30 s with eight shades each refreshes about every four minutes). While it
-is on, the live reading (signal and position; the cached position also goes
-stale after remote moves on this hub) is kept over the cached shadow values
-until it is three sweep rounds old; set it back to 0 and the cached values are
+is on, a live reading (signal and position) takes precedence over the hub's
+cached shadow values for a short window, three sweep rounds, then the cached
+values apply again. The reason for including position is unverified field
+observation on one hub that the cached position looked stale after moves made
+from a remote; treat it as a hypothesis. A move or stop sent through Home
+Assistant clears the position window at once, so the hub's reports for that
+move are never held back. Set the option back to 0 and the cached values are
 used again, no code change. The option accepts 0 (off) or 10 to 3600 s. One RF
 exchange per interval is a small fraction of the hub's own traffic; the
 integration never opens port 1487 twice at once, and a dead port cannot hold

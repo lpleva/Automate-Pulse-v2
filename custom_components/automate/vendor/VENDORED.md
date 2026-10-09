@@ -32,23 +32,37 @@ The package needed no import rewrite: it already used relative imports.
    to dBm (`R/2 - 134`, so `R68` is -82 dBm) instead of storing the raw integer
    (104). The websocket `rs` field is already dBm, so the two paths now agree.
    `set_signal` returns whether the value changed.
-2. **Live signal sweep (opt-in).** `Hub(signal_poll_interval=N)` queries ONE
-   shade's position and signal over the serial port (`!<id>r?;`) every N
-   seconds, round-robin. On the Pulse Pro the websocket `rs` is the hub's cached
+2. **Live signal sweep (opt-in).** `Hub(signal_poll_interval=N)` (N is 0 or at
+   least 10) queries ONE shade's position and signal over the serial port
+   (`!<id>r?;`) every N seconds, round-robin, skipping ticks while a name lookup
+   still owns the port. On the Pulse Pro the websocket `rs` is the hub's cached
    last reading and does not refresh by itself; this query polls the motor live
-   over RF. While the sweep is on and a roller has a fresh live reading (newer
-   than three sweep rounds), the cached `rs` is not applied to it. Default 0
-   (off): with it off the library behaves as upstream, cached `rs` only.
+   over RF. Each roller keeps two timestamps, `serial_signal_at` and
+   `serial_position_at`, set by every live reply. While the sweep is on and a
+   timestamp is fresh (within three sweep rounds, `signal_stale_after()`), the
+   cached `rs` (`use_ws_signal`) or `mp` (`use_ws_position`) is not applied to
+   that roller. `Roller.move_to` and `move_stop` clear `serial_position_at`, so
+   the hub's position reports for a move commanded through this library apply at
+   once. Including position rests on an unverified field observation (cached
+   position looking stale after remote moves); signal is the proven case.
+   Default 0 (off): with it off the library behaves as upstream, cached values
+   only.
 3. **Serial name lookup is retried.** Upstream's 3 s read timeout exited both
    loops (its "sleep 10 and retry" was unreachable) and never closed the socket;
    a reply for an unknown id raised `KeyError` and killed the runner; nothing
-   ever started it again. Now: each session reads until 3 s of quiet or EOF and
-   closes its socket; attempts retry with a doubling back-off (10 s to 5 min);
-   after three failed attempts every still-unnamed roller gets the placeholder
-   name `Shade <id>` so consumers are released, and the heartbeat's hourly tick
-   re-queues placeholders for another try. Replies for unknown ids are ignored.
-   The name lookup and the sweep share one `asyncio.Lock`, so port 1487 is never
-   opened twice at once.
+   ever started it again. Now: each session opens with a 10 s connect timeout
+   (`SERIAL_CONNECT_TIMEOUT`, so a dead port cannot hold the lock), reads until
+   3 s of quiet or EOF and closes its socket; a failed attempt, whether a
+   connection error or any other exception (the `except` is inside the loop),
+   is counted and retried with a doubling back-off (10 s to 5 min); after three
+   failed attempts `_apply_fallback_names` runs regardless of what the rollers
+   are called: still-nameless rollers get the placeholder `Shade <id>`,
+   `unknown_rollers` is cleared and consumers are released. The heartbeat's
+   hourly tick (`requeue_placeholder_names`) re-queues every roller whose name
+   is a placeholder or still None and starts the runner again; against a port
+   that stays silent that run also ends after three attempts, so the sweep is
+   never starved. Replies for unknown ids are ignored. The name lookup and the
+   sweep share one `asyncio.Lock`, so port 1487 is never opened twice at once.
 4. **Defensive parsing.** `wsconsumer` tolerates a shadow without `shades`
    (upstream raised `KeyError`, which tore the websocket down and reconnected 10
    s later, for every such message), non-dict `mfi`/`firmware`/shade entries,
@@ -82,6 +96,9 @@ The package needed no import rewrite: it already used relative imports.
     outside a loop); `inspect.iscoroutinefunction` replaces the asyncio one
     (deprecated in Python 3.14, removed in 3.16); `asyncio.timeout` replaces
     `async_timeout`; the TLS context gets a TLS 1.2 floor.
+13. **Heartbeat guard.** The poll loop's body is wrapped: `CancelledError` is
+    re-raised, any other exception is logged as a warning and the loop keeps
+    polling, since it is the only way state reaches consumers.
 
 `__init__.py`: exports `HubBaseException`; `__version__` is `1.0.0+lpleva`.
 `const.py`, `errors.py`: unchanged.
@@ -108,6 +125,6 @@ The package needed no import rewrite: it already used relative imports.
 
 ## Re-applying on a newer upstream
 
-Diff upstream's new release against the `v1.0.0` tag, then re-apply the twelve
-changes above on top; the tests in `test/test_library_*.py` are the acceptance
-suite. Upstream `main` has no tests of its own.
+Diff upstream's new release against the `v1.0.0` tag, then re-apply the
+thirteen changes above on top; the tests in `test/test_library_*.py` are the
+acceptance suite. Upstream `main` has no tests of its own.

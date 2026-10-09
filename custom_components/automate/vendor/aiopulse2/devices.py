@@ -309,7 +309,7 @@ class Hub:
             _LOGGER.debug("Serial position response for unknown roller %s", id)
             return
         # Live values from the motor: position and signal both follow the
-        # "live wins until stale" rule in use_ws_values, so the hub's cached
+        # "live wins until stale" rule (use_ws_signal, use_ws_position), so the cached
         # shadow cannot flap them back between sweep replies.
         changed = self.applychanges(
             roller,
@@ -319,7 +319,9 @@ class Hub:
             },
         )
         changed = roller.set_signal(signal) or changed
-        roller.serial_signal_at = time.monotonic()
+        now = time.monotonic()
+        roller.serial_signal_at = now
+        roller.serial_position_at = now
         if changed:
             roller.notify_callback()
 
@@ -388,17 +390,29 @@ class Hub:
         rounds = max(len(self.rollers), 1) * self.signal_poll_interval
         return max(SIGNAL_STALE_ROUNDS * rounds, 10 * MIN_SIGNAL_POLL_INTERVAL)
 
-    def use_ws_values(self, roller) -> bool:
-        """True when the websocket's cached "rs" and "mp" apply to this roller.
+    def _live_reading_is_fresh(self, read_at) -> bool:
+        """True while a live serial reading taken at `read_at` should win."""
+        if self.signal_poll_interval <= 0 or read_at is None:
+            return False
+        return time.monotonic() - read_at <= self.signal_stale_after()
 
-        The live serial reading (signal AND position) wins while the sweep is on
-        and keeping it fresh; the cached values are used again if the sweep is
-        off or has fallen behind. On the Pulse Pro the cached position also goes
-        stale after remote moves, so the live value is the better one.
+    def use_ws_signal(self, roller) -> bool:
+        """True when the websocket's cached "rs" applies to this roller.
+
+        The live serial reading wins while the sweep is on and keeping it fresh;
+        the cached value is used again if the sweep is off or has fallen behind.
         """
-        if self.signal_poll_interval <= 0 or roller.serial_signal_at is None:
-            return True
-        return time.monotonic() - roller.serial_signal_at > self.signal_stale_after()
+        return not self._live_reading_is_fresh(roller.serial_signal_at)
+
+    def use_ws_position(self, roller) -> bool:
+        """True when the websocket's cached "mp" applies to this roller.
+
+        Same rule as the signal, with its own timestamp: a command sent through
+        this library (move_to, move_stop) clears it, so the hub's position
+        reports for that move are applied at once instead of being held back
+        until the sweep next reads the shade.
+        """
+        return not self._live_reading_is_fresh(roller.serial_position_at)
 
     async def signal_sweep(self):
         """Query one shade's live signal every signal_poll_interval seconds."""
@@ -611,14 +625,14 @@ class Hub:
         keys from the last shade, and defaults here would make that shade flap.
         """
         newvals: Dict[str, Any] = {}
-        use_cached = self.use_ws_values(self.rollers[rollerid])
-        if "rs" in roller and use_cached:
+        current = self.rollers[rollerid]
+        if "rs" in roller and self.use_ws_signal(current):
             newvals["signal"] = roller["rs"]
         if "is" in roller:
             newvals["moving"] = not roller["is"]
         if "ol" in roller:
             newvals["online"] = bool(roller["ol"])
-        if roller.get("mp") is not None and use_cached:
+        if roller.get("mp") is not None and self.use_ws_position(current):
             try:
                 newvals["closed_percent"] = int(roller["mp"])
             except (TypeError, ValueError):
@@ -877,9 +891,11 @@ class Roller:
         self.closed_percent = None
         self.tilt_percent = None
         self.signal = None
-        # time.monotonic() of the last LIVE signal reading from the serial port;
-        # None until the sweep has queried this roller.
+        # time.monotonic() of the last LIVE reading from the serial port, None
+        # until the sweep has queried this roller. Signal and position are kept
+        # apart: a command through this library clears the position one.
         self.serial_signal_at = None
+        self.serial_position_at = None
         self.version = None
         self._moving = False
         self.action = MovingAction.stopped
@@ -1004,6 +1020,9 @@ class Roller:
                 self.action = MovingAction.stopped
             self._moving = True
             self.target_closed_percent = percent
+        # We are moving the shade: the hub's position reports for this move must
+        # apply at once, not wait out a live reading's freshness window.
+        self.serial_position_at = None
         self.notify_callback()
         await self.hub.send_payload(
             {
@@ -1025,6 +1044,7 @@ class Roller:
 
     async def move_stop(self):
         """Send command to stop the roller."""
+        self.serial_position_at = None  # see move_to
         await self.hub.send_payload(
             {
                 "method": "shadow",

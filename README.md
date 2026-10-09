@@ -42,7 +42,7 @@ Once registration is complete, you should see a `cover` and a `sensor` entity fo
 Settings > Devices & services > Automate Pulse Hub v2 > Configure:
 
 - **Hub state poll interval** (seconds, default 10, 2 to 300): how often the hub is asked for the state of every shade. Each request makes the hub serialise its whole state document, so raise this if you only need battery and signal (30 to 60 s is plenty).
-- **Live signal query interval** (seconds, default 0 = off, up to 3600): how often ONE shade is asked, over the hub's serial port, for a live radio signal reading; shades take turns. On Pulse Pro hubs the signal the hub reports over the websocket is its cached last reading and does not refresh on its own. Turn this on to watch signal quality live, off again to go back to the cached value.
+- **Live signal query interval** (seconds, default 0 = off; otherwise 10 to 3600): how often ONE shade is asked, over the hub's serial port, for a live radio signal reading; shades take turns. On Pulse Pro hubs the signal the hub reports over the websocket is its cached last reading and does not refresh on its own. Turn this on to watch signal quality live, off again to go back to the cached value.
 
 A change to either reloads the integration.
 

@@ -156,9 +156,49 @@ async def test_live_position_wins_over_cached_ws_value_until_stale():
     assert roller.closed_percent == 50
     await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 30}}))
     assert roller.closed_percent == 50, "the cached position flapped the live one back"
-    roller.serial_signal_at = time.monotonic() - hub.signal_stale_after() - 1
+    roller.serial_position_at = time.monotonic() - hub.signal_stale_after() - 1
     await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 30}}))
     assert roller.closed_percent == 30
+    assert roller.signal == -92, "the signal keeps its own freshness window"
+
+
+async def test_our_own_move_lets_the_hub_position_through(monkeypatch):
+    """Reviewer regression: after move_to, the hub's mp reports were held back."""
+    hub = Hub(HUB_HOST, delay_callbacks=False, signal_poll_interval=30)
+    sent = []
+
+    async def fake_send(payload):
+        sent.append(payload)
+
+    monkeypatch.setattr(hub, "send_payload", fake_send)
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 50}}))
+    roller = hub.rollers["ABC"]
+    hub.response_parse("!ABCr050b000,R54;")  # live read: 50 %
+    assert roller.closed_percent == 50
+    await roller.move_to(0)
+    assert sent[0]["args"]["desired"] == {"shades": {"ABC": {"movePercent": 0}}}
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 20}}))
+    assert roller.closed_percent == 20
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 0}}))
+    assert roller.closed_percent == 0
+    assert roller.signal == -92, "rs behaviour unchanged: the live signal still wins"
+    await roller.move_stop()
+    assert roller.serial_position_at is None
+    assert sent[1]["args"]["desired"] == {"shades": {"ABC": {"stopShade": True}}}
+
+
+async def test_requeue_includes_rollers_with_no_name_at_all():
+    hub = Hub(HUB_HOST)
+    hub.running = True
+    hub.rollers["ABC"] = devices.Roller(hub, "ABC")  # name None, not queued
+    hub.rollers["DEF"] = devices.Roller(hub, "DEF")
+    hub.rollers["DEF"].name = "Office"
+    hub.rollers["GHI"] = devices.Roller(hub, "GHI")
+    hub.rollers["GHI"].name = "Shade GHI"
+    hub.rollers["GHI"].name_is_placeholder = True
+    hub.serialrunning = True  # pretend a runner exists so no task (and no socket) starts
+    hub.requeue_placeholder_names()
+    assert hub.unknown_rollers == {"ABC", "GHI"}
 
 
 async def test_unparseable_message_warns_once_then_debug(hub, caplog):
