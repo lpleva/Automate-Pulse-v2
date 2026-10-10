@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "fork": "Automate-Pulse-v2",
+  "upstream": "https://github.com/sillyfrog/Automate-Pulse-v2.git",
+  "branch": "master",
+  "baseline": {
+    "sha": "f9015a67e4eb722b644b5bafd26155b88ffd0e69",
+    "date": "2026-02-12",
+    "subject": "Re order function calls to address issue seen by some users",
+    "note": "Upstream v1.0.1 tip (2026-02-12), the fork point. Covered by the full audit of 2026-10-08 (fork release 1.1.0; CHANGELOG 1.1.0; aiopulse2 1.0.0 vendored and audited with it). Upstream master has not moved since."
+  },
+  "notes": [],
+  "commits": []
+}
