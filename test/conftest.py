@@ -38,6 +38,12 @@ async def _fake_run(self):
         self.running = False
 
 
+@pytest.fixture(autouse=True)
+def no_serial_spacing(monkeypatch):
+    """No 0.75 s pause between fake serial sessions; the spacing test sets it back."""
+    monkeypatch.setattr(devices, "SERIAL_SESSION_SPACING", 0)
+
+
 @pytest.fixture
 def no_network():
     """Keep the library off the network: no websocket, no serial lookups."""

@@ -1,6 +1,7 @@
 """Vendored aiopulse2: the serial (port 1487) side, against a fake hub on 127.0.0.1."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -410,3 +411,74 @@ async def test_query_signal_is_one_sweep_query_and_reports_the_reply():
         await hub._cancel_background_tasks()
         if fake.server.is_serving():
             await fake.stop()
+
+
+async def test_query_signal_coalesces_rapid_callers():
+    """Six callers at once for one shade: one session, one query, the same answer for all."""
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _hub_with_fake(fake, signal_poll_interval=30)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.serial_task, 3)
+        fake.received.clear()
+        results = await asyncio.gather(*(hub.query_signal("ABC") for _ in range(6)))
+        assert results == [True] * 6
+        assert fake.received == ["!ABCr?;"]
+        assert fake.connections == 2  # the name lookup, then the one query
+        assert hub.rollers["ABC"].signal_checks == 1
+        assert hub._signal_queries == {}, "nothing left in flight"
+        # A later call is a new query
+        assert await hub.query_signal("ABC") is True
+        assert fake.received == ["!ABCr?;", "!ABCr?;"]
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()
+
+
+class FakeClock:
+    """A monotonic clock the library's sleeps advance, so no test actually waits."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+        await asyncio.sleep(0)
+
+
+async def test_serial_sessions_are_spaced_whoever_asks(monkeypatch):
+    """0.75 s from one session's close to the next one's open: queries, sweep and name lookup alike."""
+    import types
+
+    clock = FakeClock()
+    monkeypatch.setattr(devices, "SERIAL_SESSION_SPACING", 0.75)
+    monkeypatch.setattr(devices, "time", types.SimpleNamespace(monotonic=clock.monotonic, time=time.time))
+    monkeypatch.setattr(devices, "asyncio", types.SimpleNamespace(**{**vars(asyncio), "sleep": clock.sleep}))
+    fake = FakeSerialHub(names={"ABC": "Kitchen", "DEF": "Office"})
+    hub = await _hub_with_fake(fake, signal_poll_interval=30)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}, "DEF": {"rs": -70}}))
+        await asyncio.wait_for(hub.serial_task, 3)  # the name lookup: the first session
+        assert fake.connections == 1
+        assert clock.sleeps == [], "nothing to wait for before the first session"
+
+        assert await hub.query_signal("ABC") is True
+        assert clock.sleeps == [0.75], "a full spacing after the name lookup closed"
+        clock.now += 0.5  # half the spacing passes on its own
+        assert await hub.query_signal("DEF") is True
+        assert clock.sleeps == [0.75, 0.25], "only the remainder is waited out"
+        assert fake.connections == 3
+        assert fake.received[-2:] == ["!ABCr?;", "!DEFr?;"]
+
+        clock.now += 1  # more than the spacing has passed: no wait at all
+        await hub._serial_query_position("ABC")  # what a sweep tick does
+        assert clock.sleeps == [0.75, 0.25]
+        assert fake.connections == 4
+    finally:
+        await hub._cancel_background_tasks()
+        await fake.stop()

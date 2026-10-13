@@ -116,13 +116,22 @@ The package needed no import rewrite: it already used relative imports.
     back then, so a dead port showed an old number as current). Position
     (`use_ws_position`) is unchanged. Every check notifies the roller's
     subscribers, so the counters reach consumers.
-15. **On-demand signal query.** `Hub.query_signal(rollerid)` sends one shade
-    the sweep's own serial query (`!<id>r?;`) right away, through
-    `_serial_query_position`, which now returns whether the roller replied.
-    It shares the sweep's lock, counts a check or a miss like a sweep tick,
-    works with the sweep off too (the cached `rs` then comes back on the next
-    shadow poll), and raises `OSError` / `asyncio.TimeoutError` when the port
-    cannot be reached and `KeyError` for an unknown id. It is what the
+15. **On-demand signal query, paced and coalesced.** `Hub.query_signal(rollerid)`
+    sends one shade the sweep's own serial query (`!<id>r?;`) right away,
+    through `_serial_query_position`, which now returns whether the roller
+    replied. It shares the sweep's lock, counts a check or a miss like a sweep
+    tick, works with the sweep off too (the cached `rs` then comes back on the
+    next shadow poll), and raises `OSError` / `asyncio.TimeoutError` when the
+    port cannot be reached and `KeyError` for an unknown id. Callers for the
+    same roller while its query is pending share that query's task
+    (`_signal_queries`, awaited through `asyncio.shield` so one caller giving
+    up cancels nothing; the tasks are cancelled with the other background
+    tasks). And `_serial_session` records when each session closed
+    (`_serial_session_ended_at`) and, under the lock, waits out what is left of
+    `SERIAL_SESSION_SPACING` (0.75 s) before opening the next one
+    (`_pace_serial_session`), whoever asks: a burst of on-demand queries, the
+    sweep and the name lookup all open the port one at a time, that far apart.
+    A session that never opened records no end time. This is what the
     integration's Refresh signal button and `automate.refresh_signal` action
     call.
 

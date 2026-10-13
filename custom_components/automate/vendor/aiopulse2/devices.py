@@ -53,6 +53,10 @@ SERIAL_READ_TIMEOUT = 3
 SERIAL_RETRY_MIN = 10
 SERIAL_RETRY_MAX = 300
 SERIAL_FALLBACK_ATTEMPTS = 3
+# Seconds between one serial session's end and the next one's open, whoever asks
+# (the sweep, the name lookup, an on-demand query), so a burst of queries cannot
+# flood the hub's radio. Enforced under serial_lock.
+SERIAL_SESSION_SPACING = 0.75
 
 # The websocket "rs" field is dBm. The serial protocol's ",R<hex>" field is a raw
 # radio register; this is the conversion to dBm.
@@ -201,6 +205,12 @@ class Hub:
         # One serial-port session at a time: the name lookup and the signal sweep
         # share the hub's single port 1487.
         self.serial_lock = asyncio.Lock()
+        # time.monotonic() when the last serial session closed, None before any;
+        # the next session waits out SERIAL_SESSION_SPACING from it.
+        self._serial_session_ended_at: Optional[float] = None
+        # On-demand signal queries in flight, by roller id: callers arriving while
+        # one is pending share its result instead of queueing another session.
+        self._signal_queries: Dict[str, asyncio.Task] = {}
         self._sweep_position = 0
         self.sent_details_request = set()
         self.payload_queue = []
@@ -353,9 +363,12 @@ class Hub:
         """One serial-port session: send `commands`, parse replies until quiet.
 
         Stops early when `done()` returns True. Holds serial_lock so the name
-        lookup and the signal sweep never open port 1487 at the same time.
+        lookup, the signal sweep and on-demand queries never open port 1487 at
+        the same time, and keeps SERIAL_SESSION_SPACING between one session's
+        close and the next one's open, whoever asks.
         """
         async with self.serial_lock:
+            await self._pace_serial_session()
             async with asyncio.timeout(SERIAL_CONNECT_TIMEOUT):
                 reader, writer = await asyncio.open_connection(
                     self.host, port=self.serial_port
@@ -377,6 +390,20 @@ class Hub:
                         break
             finally:
                 writer.close()
+                self._serial_session_ended_at = time.monotonic()
+
+    async def _pace_serial_session(self) -> None:
+        """Wait out what is left of SERIAL_SESSION_SPACING since the last session closed.
+
+        Called with serial_lock held, so a burst of callers still opens the port
+        one at a time, that far apart. A session that never opened (connection
+        refused, connect timeout) records no end time and so imposes no wait.
+        """
+        if self._serial_session_ended_at is None:
+            return
+        remaining = SERIAL_SESSION_SPACING - (time.monotonic() - self._serial_session_ended_at)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
     async def _serial_query_names(self, rollerids) -> None:
         """Ask the serial port for each roller's name, read until quiet."""
@@ -425,16 +452,31 @@ class Hub:
         query on port 1487, nothing else; the reply lands through the same
         handler, so the roller's signal, position and check counters update as
         they do for the sweep. Shares the sweep's lock, so it waits out a
-        session in flight rather than opening the port twice. Works whether or
-        not the sweep is on (with it off the hub's cached "rs" is applied again
-        on the next shadow poll). Returns True when the shade replied, False
-        when it did not (a miss, counted like any other). Raises OSError or
-        asyncio.TimeoutError when the serial port cannot be reached, and KeyError
-        for an id this hub does not know.
+        session in flight rather than opening the port twice, and the next
+        session opens no sooner than SERIAL_SESSION_SPACING after the last one
+        closed. Callers for the same shade while its query is still pending
+        (a button pressed six times) share that one query's result instead of
+        queueing more sessions. Works whether or not the sweep is on (with it
+        off the hub's cached "rs" is applied again on the next shadow poll).
+        Returns True when the shade replied, False when it did not (a miss,
+        counted like any other). Raises OSError or asyncio.TimeoutError when the
+        serial port cannot be reached, and KeyError for an id this hub does not
+        know.
         """
         if rollerid not in self.rollers:
             raise KeyError(rollerid)
-        return await self._serial_query_position(rollerid)
+        task = self._signal_queries.get(rollerid)
+        if task is None:
+            task = self.loop.create_task(self._serial_query_position(rollerid))
+            self._signal_queries[rollerid] = task
+            task.add_done_callback(
+                lambda t: self._signal_queries.pop(rollerid, None)
+                if self._signal_queries.get(rollerid) is t
+                else None
+            )
+        # Shielded: one caller giving up must not cancel the query the others
+        # (and the hub) are already committed to.
+        return await asyncio.shield(task)
 
     def signal_stale_after(self) -> float:
         """Seconds after which a live serial reading no longer counts as current."""
@@ -893,7 +935,12 @@ class Hub:
         """Cancel the heartbeat and serial tasks and wait for them."""
         tasks = [
             t
-            for t in (self.heartbeat_task, self.serial_task, self.signal_task)
+            for t in (
+                self.heartbeat_task,
+                self.serial_task,
+                self.signal_task,
+                *self._signal_queries.values(),
+            )
             if t and not t.done()
         ]
         for task in tasks:
