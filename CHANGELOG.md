@@ -19,35 +19,49 @@ the sweep to come round (at 30 s with eight shades, up to four minutes).
   the hub poll the motor over radio), and the shade's Signal sensor updates when
   the hub answers, through the same path as a sweep reply. It never moves a
   shade, changes a limit, or sends any other command. If the hub is
-  disconnected, the shade is offline, or the hub's serial port cannot be
-  reached, the press fails with a message that says which; a shade that does
-  not answer within 8 s fails with "did not answer", and counts as a missed
-  check while the sweep is on. The button waits its turn if the sweep is
-  mid-query, so port 1487 is still never opened twice at once.
+  disconnected, the shade is offline or no longer known to the hub, or the
+  hub's serial port cannot be reached, the press fails with a message that says
+  which; a shade that does not answer within 8 s fails with "did not answer",
+  and counts as a missed check while the sweep is on. Pressing it six times in
+  a row sends one query: presses that arrive while the shade's query is still
+  pending share its answer.
 - **`automate.refresh_signal` action**: the same query for every targeted shade,
-  one after another, 0.75 s apart, so a card or an automation can refresh
-  several without flooding the hub's radio. Targets are the standard ones: a
-  shade's cover or its Refresh signal button (any of its sensors works too), a
-  device, an area, or `entity_id: all`. A shade targeted more than once is
-  queried once. A target that is not one of this integration's shades, a
-  disconnected hub, an offline shade, an unreachable port or a shade that does
-  not answer is a warning in the log for that shade, never an error out of the
-  action: the other shades still get their turn.
+  one after another, so a card or an automation can refresh several at once.
+  Targets are the standard ones: a shade's cover or its Refresh signal button
+  (any of its sensors works too), a device, an area, or `entity_id: all`. A
+  shade targeted more than once is queried once. An explicitly named entity
+  that is not one of this integration's shades is a warning; the other
+  entities of a targeted area or device (the room's lights) are skipped
+  silently, as Home Assistant's own entity actions do. A disconnected hub, an
+  offline shade, an unreachable port or a shade that does not answer is a
+  warning in the log for that shade, never an error out of the action: the
+  other shades still get their turn.
+- **Serial sessions are spaced, whoever asks.** The library now opens the hub's
+  serial port no sooner than 0.75 s after the previous session closed, under
+  the same lock that already kept it from being opened twice at once. That
+  covers a burst of button presses on different shades, the action's targets,
+  the sweep and the name lookup alike, so the hub's radio is never asked twice
+  in quick succession. A press queued behind a sweep session in progress waits
+  for it (up to 8 s) and then its 0.75 s.
 - With the sweep off (option at 0) both still work: the live reading shows until
   the next hub poll puts the hub's cached value back, as 1.1.0 documented for a
   serial reading.
 
 ### Testing
 
-- 74 tests (68 before): the button exists per shade with the diagnostic category,
+- 77 tests (68 before): the button exists per shade with the diagnostic category,
   a stable unique id and the shade's device; a press sends exactly that shade's
   query and nothing else through the fake serial port, and the sensor follows the
-  reply; each error case (hub disconnected, shade offline, dead port, silent
-  shade) raises a clear message; the action queries the targets in the order
-  given, once per shade, resolves a device target and `all`, skips unknown
-  entities with a warning, refuses an empty call, and warns per shade on a
-  disconnected hub without opening the port; and the library's `query_signal`
-  reports a reply and a miss.
+  reply; six presses at once open one session; each error case (hub
+  disconnected, shade offline, dead port, silent shade, shade no longer known)
+  raises a clear message; the action queries the targets in the order given,
+  once per shade, resolves a device target, an area target (with a light and a
+  lock in the same area, queried without a warning) and `all`, skips unknown
+  explicit entities with a warning, refuses an empty call, and warns per shade
+  on a disconnected hub without opening the port; and in the library,
+  `query_signal` reports a reply and a miss, six callers at once share one
+  session, and sessions are spaced 0.75 s apart against a fake clock (a full
+  wait, a remainder, and no wait once enough time has passed).
 
 ## 1.2.0 (2026-10-09)
 

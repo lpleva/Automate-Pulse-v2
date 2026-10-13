@@ -55,9 +55,11 @@ away; the shade's Signal sensor updates when it answers (a shade that does not
 answer shows an error, and counts as a missed check while the sweep is on). It
 never moves a shade or changes its settings. The same query is available as the
 action **`automate.refresh_signal`**, which takes standard targets (a shade's
-cover or its button; a device or an area works too) and asks each shade in turn,
-0.75 s apart, so a card or an automation can refresh several at once without
-flooding the hub's radio. With the sweep off the live reading shows until the
+cover or its button; a device or an area works too) and asks each shade in turn.
+Whoever asks, the hub's serial port is opened one session at a time and no
+sooner than 0.75 s after the last one closed, and presses for a shade whose
+query is still pending share its answer, so neither a card nor an automation
+can flood the hub's radio. With the sweep off the live reading shows until the
 next hub poll puts the hub's cached value back.
 
 ## Caveats
