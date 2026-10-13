@@ -5,6 +5,50 @@ This is Lukas Pleva's fork of
 It carries the October 2026 audit fixes upstream does not have; a Saturday job
 merges upstream into it and the delta is audited before it reaches `main`.
 
+## Unreleased
+
+A live signal reading on demand, for one shade or several, without waiting for
+the sweep to come round (at 30 s with eight shades, up to four minutes).
+
+### Added
+
+- **`Refresh signal` button per shade** (`button.<shade>_refresh_signal`,
+  diagnostic, so it stays off auto-generated dashboards; same device as the
+  shade). Pressing it sends that one shade, right away, exactly the query the
+  live sweep sends on its turn (the serial `!<id>r?;` on port 1487, which makes
+  the hub poll the motor over radio), and the shade's Signal sensor updates when
+  the hub answers, through the same path as a sweep reply. It never moves a
+  shade, changes a limit, or sends any other command. If the hub is
+  disconnected, the shade is offline, or the hub's serial port cannot be
+  reached, the press fails with a message that says which; a shade that does
+  not answer within 8 s fails with "did not answer", and counts as a missed
+  check while the sweep is on. The button waits its turn if the sweep is
+  mid-query, so port 1487 is still never opened twice at once.
+- **`automate.refresh_signal` action**: the same query for every targeted shade,
+  one after another, 0.75 s apart, so a card or an automation can refresh
+  several without flooding the hub's radio. Targets are the standard ones: a
+  shade's cover or its Refresh signal button (any of its sensors works too), a
+  device, an area, or `entity_id: all`. A shade targeted more than once is
+  queried once. A target that is not one of this integration's shades, a
+  disconnected hub, an offline shade, an unreachable port or a shade that does
+  not answer is a warning in the log for that shade, never an error out of the
+  action: the other shades still get their turn.
+- With the sweep off (option at 0) both still work: the live reading shows until
+  the next hub poll puts the hub's cached value back, as 1.1.0 documented for a
+  serial reading.
+
+### Testing
+
+- 74 tests (68 before): the button exists per shade with the diagnostic category,
+  a stable unique id and the shade's device; a press sends exactly that shade's
+  query and nothing else through the fake serial port, and the sensor follows the
+  reply; each error case (hub disconnected, shade offline, dead port, silent
+  shade) raises a clear message; the action queries the targets in the order
+  given, once per shade, resolves a device target and `all`, skips unknown
+  entities with a warning, refuses an empty call, and warns per shade on a
+  disconnected hub without opening the port; and the library's `query_signal`
+  reports a reply and a miss.
+
 ## 1.2.0 (2026-10-09)
 
 Missed live signal checks are visible instead of hidden. Until now, with the

@@ -46,6 +46,20 @@ Settings > Devices & services > Automate Pulse Hub v2 > Configure:
 
 A change to either reloads the integration.
 
+## Refresh a shade's signal on demand (this fork)
+
+Each shade also has a diagnostic **Refresh signal** button
+(`button.<shade>_refresh_signal`, kept off auto-generated dashboards). Pressing
+it sends that one shade the same query the live sweep sends on its turn, right
+away; the shade's Signal sensor updates when it answers (a shade that does not
+answer shows an error, and counts as a missed check while the sweep is on). It
+never moves a shade or changes its settings. The same query is available as the
+action **`automate.refresh_signal`**, which takes standard targets (a shade's
+cover or its button; a device or an area works too) and asks each shade in turn,
+0.75 s apart, so a card or an automation can refresh several at once without
+flooding the hub's radio. With the sweep off the live reading shows until the
+next hub poll puts the hub's cached value back.
+
 ## Caveats
 
 If the IP address for the hub changes, you will need to re-register it with Home Assistant again. To avoid this, set up a DHCP reservation on your router for your hub so that it always has the same IP address.
