@@ -145,6 +145,10 @@ class PulseHub:
             )
         try:
             return await self.api.query_signal(roller.id)
+        except KeyError:
+            raise HomeAssistantError(
+                f"Cannot refresh the signal of {name}: it is no longer known to the hub"
+            ) from None
         except (OSError, asyncio.TimeoutError) as err:
             raise HomeAssistantError(
                 f"Cannot refresh the signal of {name}: the hub's serial port "

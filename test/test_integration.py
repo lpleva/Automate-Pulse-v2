@@ -1,5 +1,6 @@
 """The integration on Home Assistant 2026.9: config flow, entities, devices, options."""
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -8,7 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
 from custom_components.automate.const import (
     CONF_POLL_INTERVAL,
@@ -396,6 +397,21 @@ async def test_pressing_the_button_sends_only_that_shades_query(hass):
         misses = hass.states.get("sensor.office_missed_signal_checks")
         assert misses.state == "0" and misses.attributes["checks"] == 1
         assert hass.states.get("button.office_refresh_signal").state != STATE_UNKNOWN, "pressed"
+
+        # Six rapid presses: one session, one query; every press completes
+        fake.received.clear()
+        await asyncio.gather(
+            *(
+                hass.services.async_call(
+                    "button", "press", {"entity_id": "button.office_refresh_signal"}, blocking=True
+                )
+                for _ in range(6)
+            )
+        )
+        await settle(hass)
+        assert fake.received == ["!DEFr?;"]
+        assert fake.connections == 2
+        assert hass.states.get("sensor.office_missed_signal_checks").attributes["checks"] == 2
     finally:
         await fake.stop()
 
@@ -448,16 +464,18 @@ async def test_button_errors_are_clear(hass, monkeypatch, caplog):
         assert fake.received == ["!ABCr?;"]
         await settle(hass)
         assert hass.states.get("sensor.kitchen_missed_signal_checks").state == "1"
+
+        # The hub has forgotten the shade (it was removed from the hub's app)
+        hub.api.rollers.pop("ABC")
+        with pytest.raises(HomeAssistantError, match="no longer known to the hub"):
+            await button.async_press()
     finally:
         await fake.stop()
 
 
 @pytest.mark.usefixtures("socket_enabled")
-async def test_refresh_signal_action_queries_each_target_in_order(hass, monkeypatch, caplog):
+async def test_refresh_signal_action_queries_each_target_in_order(hass, caplog):
     """Targets in the order given, one query per shade, unknown entities skipped with a warning."""
-    from custom_components.automate import const as automate_const
-
-    monkeypatch.setattr(automate_const, "REFRESH_SIGNAL_SPACING", 0)
     fake = FakeSerialHub()
     hub = await _setup(hass, _sweep_entry(hass))
     hub.api.host = "127.0.0.1"
@@ -517,3 +535,34 @@ async def test_refresh_signal_action_warns_per_shade_when_the_hub_is_disconnecte
     assert "cover.kitchen: Cannot refresh the signal of Kitchen" in caplog.text
     assert "cover.office: Cannot refresh the signal of Office" in caplog.text
     assert "not connected" in caplog.text
+
+
+@pytest.mark.usefixtures("socket_enabled")
+async def test_refresh_signal_action_area_target_skips_other_entities_silently(hass, caplog):
+    """An area with a shade, a light and a lock: the shade is queried, nothing is warned about."""
+    fake = FakeSerialHub()
+    hub = await _setup(hass, _sweep_entry(hass))
+    hub.api.host = "127.0.0.1"
+    hub.api.serial_port = await fake.start()
+    try:
+        await _two_shades(hass, hub)
+        area = ar.async_get(hass).async_create("Kitchen")
+        ent_reg = er.async_get(hass)
+        dr.async_get(hass).async_update_device(
+            ent_reg.async_get("cover.kitchen").device_id, area_id=area.id
+        )
+        for domain, platform in (("light", "demo"), ("lock", "demo")):
+            entry = ent_reg.async_get_or_create(domain, platform, f"{domain}-1", suggested_object_id="kitchen")
+            ent_reg.async_update_entity(entry.entity_id, area_id=area.id)
+            hass.states.async_set(entry.entity_id, "off")
+
+        caplog.clear()
+        await hass.services.async_call(DOMAIN, "refresh_signal", {"area_id": area.id}, blocking=True)
+        await settle(hass)
+        assert fake.received == ["!ABCr?;"]
+        assert hass.states.get("sensor.kitchen_signal").state == "-92"
+        assert "not one of this integration" not in caplog.text
+        assert "missing or not currently available" not in caplog.text
+        assert "WARNING" not in caplog.text, caplog.text
+    finally:
+        await fake.stop()
