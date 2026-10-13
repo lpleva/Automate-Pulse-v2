@@ -29,5 +29,11 @@
         }
       }
     }
+  },
+  "services": {
+    "refresh_signal": {
+      "name": "Refresh signal",
+      "description": "Asks each targeted shade for a live radio signal reading right now, one shade at a time, the same query the live signal sweep sends. The shade's Signal sensor updates when it answers. Target a shade's cover or its Refresh signal button. Never moves a shade."
+    }
   }
 }

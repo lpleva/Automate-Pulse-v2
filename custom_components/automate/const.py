@@ -18,3 +18,8 @@ MAX_SIGNAL_POLL_INTERVAL = 3600
 
 # Seconds the config flow waits for the hub's first reply before giving up.
 CONNECT_TEST_TIMEOUT = 20
+
+# The `automate.refresh_signal` action: one live signal query per targeted shade,
+# one after another, this many seconds apart so the hub's radio is not flooded.
+SERVICE_REFRESH_SIGNAL = "refresh_signal"
+REFRESH_SIGNAL_SPACING = 0.75

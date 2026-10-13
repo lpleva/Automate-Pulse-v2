@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, format_mac
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -108,6 +109,47 @@ class PulseHub:
         self.tasks.clear()
 
         return True
+
+    def roller_for_unique_id(self, unique_id: str) -> aiopulse2.Roller | None:
+        """The roller behind one of this hub's entity unique ids, or None.
+
+        Every entity of a shade is keyed on the roller id: the cover is the id
+        itself, the sensors and the button add a suffix (`<id>_signal`,
+        `<id>_refresh_signal`, ...).
+        """
+        if self.api is None:
+            return None
+        for roller_id, roller in self.api.rollers.items():
+            if unique_id == roller_id or unique_id.startswith(f"{roller_id}_"):
+                return roller
+        return None
+
+    async def async_refresh_signal(self, roller: aiopulse2.Roller) -> bool:
+        """Ask one shade for a live signal reading now; True when it answered.
+
+        The same serial query the live sweep sends (`!<id>r?;` over port 1487);
+        the reply updates the shade's signal and position through the usual
+        path. Raises HomeAssistantError, with a message fit for a toast, when
+        the query cannot be sent: the hub is disconnected, the shade is offline,
+        or the hub's serial port cannot be reached. A shade that simply does not
+        answer is not an error here: it returns False, and the caller decides.
+        """
+        name = roller.name or f"Shade {roller.id}"
+        if self.api is None or not self.api.connected:
+            raise HomeAssistantError(
+                f"Cannot refresh the signal of {name}: the hub at {self.host} is not connected"
+            )
+        if not roller.online:
+            raise HomeAssistantError(
+                f"Cannot refresh the signal of {name}: the hub reports it offline"
+            )
+        try:
+            return await self.api.query_signal(roller.id)
+        except (OSError, asyncio.TimeoutError) as err:
+            raise HomeAssistantError(
+                f"Cannot refresh the signal of {name}: the hub's serial port "
+                f"{self.api.serial_port} could not be reached ({err})"
+            ) from err
 
     def _hub_device_info(self) -> dict:
         """Device registry fields for the hub itself, from what it reported."""

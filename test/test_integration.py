@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import voluptuous as vol
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
@@ -332,3 +333,187 @@ async def test_unload_stops_the_library(hass, config_entry):
     assert api.running is False
     assert hub.api is None and hub.tasks == []
     assert config_entry.entry_id not in hass.data[DOMAIN]
+
+
+# --- refresh signal: the button and the action ------------------------------------
+
+
+async def _two_shades(hass, hub):
+    await feed(
+        hass,
+        hub,
+        {"ABC": {"rs": -82, "ol": True, "mp": 30}, "DEF": {"rs": -70, "ol": True, "mp": 0}},
+        names={"ABC": "Kitchen", "DEF": "Office"},
+    )
+
+
+def _button_entity(hass, entity_id):
+    """The live ButtonEntity object, for pressing it directly."""
+    from homeassistant.helpers.entity_component import DATA_INSTANCES
+
+    return hass.data[DATA_INSTANCES]["button"].get_entity(entity_id)
+
+
+async def test_refresh_signal_button_per_shade(hass, config_entry):
+    hub = await _setup(hass, config_entry)
+    await _two_shades(hass, hub)
+
+    ent_reg = er.async_get(hass)
+    for entity_id, roller_id, cover in (
+        ("button.kitchen_refresh_signal", "ABC", "cover.kitchen"),
+        ("button.office_refresh_signal", "DEF", "cover.office"),
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, hass.states.async_entity_ids()
+        assert state.attributes["friendly_name"].endswith("Refresh signal")
+        entry = ent_reg.async_get(entity_id)
+        assert entry.unique_id == f"{roller_id}_refresh_signal"
+        assert entry.entity_category is er.EntityCategory.DIAGNOSTIC
+        assert entry.device_id == ent_reg.async_get(cover).device_id, "same device as the shade"
+    assert hass.services.has_service(DOMAIN, "refresh_signal")
+
+
+@pytest.mark.usefixtures("socket_enabled")
+async def test_pressing_the_button_sends_only_that_shades_query(hass):
+    """One press, one `!<id>r?;` for that shade, nothing else; the sensor follows the reply."""
+    fake = FakeSerialHub()
+    hub = await _setup(hass, _sweep_entry(hass))
+    hub.api.host = "127.0.0.1"
+    hub.api.serial_port = await fake.start()
+    try:
+        await _two_shades(hass, hub)
+        assert hass.states.get("sensor.office_signal").state == STATE_UNKNOWN
+
+        await hass.services.async_call(
+            "button", "press", {"entity_id": "button.office_refresh_signal"}, blocking=True
+        )
+        await settle(hass)
+
+        assert fake.received == ["!DEFr?;"], "the sweep's query for that shade, and only that"
+        assert fake.connections == 1
+        assert hass.states.get("sensor.office_signal").state == "-92"
+        assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN, "the other shade untouched"
+        misses = hass.states.get("sensor.office_missed_signal_checks")
+        assert misses.state == "0" and misses.attributes["checks"] == 1
+        assert hass.states.get("button.office_refresh_signal").state != STATE_UNKNOWN, "pressed"
+    finally:
+        await fake.stop()
+
+
+@pytest.mark.usefixtures("socket_enabled")
+async def test_button_errors_are_clear(hass, monkeypatch, caplog):
+    """A disconnected hub, an offline shade, a dead port and a silent shade each say so."""
+    from homeassistant.exceptions import HomeAssistantError
+
+    monkeypatch.setattr(devices, "SIGNAL_POLL_REPLY_TIMEOUT", 0.3)
+    fake = FakeSerialHub(silent={"ABC"})
+    hub = await _setup(hass, _sweep_entry(hass))
+    hub.api.host = "127.0.0.1"
+    port = await fake.start()
+    hub.api.serial_port = port
+    try:
+        await _two_shades(hass, hub)
+        button = _button_entity(hass, "button.kitchen_refresh_signal")
+
+        # Hub disconnected: the button is unavailable, so HA's button.press skips it
+        # (its own warning), and a direct press says why.
+        hub.api.connected = False
+        hub.api.notify_callback()
+        await settle(hass)
+        assert hass.states.get("button.kitchen_refresh_signal").state == STATE_UNAVAILABLE
+        await hass.services.async_call(
+            "button", "press", {"entity_id": "button.kitchen_refresh_signal"}, blocking=True
+        )
+        with pytest.raises(HomeAssistantError, match="not connected"):
+            await button.async_press()
+        assert fake.received == []
+        hub.api.connected = True
+
+        # Shade offline
+        await feed(hass, hub, {"ABC": {"ol": False}})
+        with pytest.raises(HomeAssistantError, match="offline"):
+            await button.async_press()
+        assert fake.received == []
+        await feed(hass, hub, {"ABC": {"ol": True}})
+
+        # Serial port unreachable (nothing listens on this port)
+        await fake.stop()
+        with pytest.raises(HomeAssistantError, match="serial port"):
+            await button.async_press()
+
+        # Port back, but the shade is out of radio range: no reply
+        hub.api.serial_port = await fake.start()
+        with pytest.raises(HomeAssistantError, match="did not answer"):
+            await button.async_press()
+        assert fake.received == ["!ABCr?;"]
+        await settle(hass)
+        assert hass.states.get("sensor.kitchen_missed_signal_checks").state == "1"
+    finally:
+        await fake.stop()
+
+
+@pytest.mark.usefixtures("socket_enabled")
+async def test_refresh_signal_action_queries_each_target_in_order(hass, monkeypatch, caplog):
+    """Targets in the order given, one query per shade, unknown entities skipped with a warning."""
+    from custom_components.automate import const as automate_const
+
+    monkeypatch.setattr(automate_const, "REFRESH_SIGNAL_SPACING", 0)
+    fake = FakeSerialHub()
+    hub = await _setup(hass, _sweep_entry(hass))
+    hub.api.host = "127.0.0.1"
+    hub.api.serial_port = await fake.start()
+    try:
+        await _two_shades(hass, hub)
+        await hass.services.async_call(
+            DOMAIN,
+            "refresh_signal",
+            {
+                "entity_id": [
+                    "cover.office",
+                    "button.kitchen_refresh_signal",
+                    "cover.kitchen",  # the same shade again: queried once
+                    "cover.not_a_shade",
+                    "light.kitchen",
+                ]
+            },
+            blocking=True,
+        )
+        await settle(hass)
+        assert fake.received == ["!DEFr?;", "!ABCr?;"]
+        assert hass.states.get("sensor.office_signal").state == "-92"
+        assert hass.states.get("sensor.kitchen_signal").state == "-92"
+        assert "cover.not_a_shade is not one of this integration's shade entities" in caplog.text
+        assert "light.kitchen is not one of this integration's shade entities" in caplog.text
+
+        # A device target resolves to that shade's entities, still one query
+        fake.received.clear()
+        device_id = er.async_get(hass).async_get("cover.kitchen").device_id
+        await hass.services.async_call(
+            DOMAIN, "refresh_signal", {"device_id": device_id}, blocking=True
+        )
+        assert fake.received == ["!ABCr?;"]
+
+        # `all`: every shade
+        fake.received.clear()
+        await hass.services.async_call(DOMAIN, "refresh_signal", {"entity_id": "all"}, blocking=True)
+        assert fake.received == ["!ABCr?;", "!DEFr?;"]
+
+        # No target at all is refused by the schema
+        with pytest.raises(vol.Invalid):
+            await hass.services.async_call(DOMAIN, "refresh_signal", {}, blocking=True)
+    finally:
+        await fake.stop()
+
+
+async def test_refresh_signal_action_warns_per_shade_when_the_hub_is_disconnected(hass, caplog):
+    hub = await _setup(hass, _sweep_entry(hass))
+    await _two_shades(hass, hub)
+    hub.api.connected = False
+    with patch.object(devices.Hub, "_serial_session") as session:
+        await hass.services.async_call(
+            DOMAIN, "refresh_signal", {"entity_id": ["cover.kitchen", "cover.office"]}, blocking=True
+        )
+    session.assert_not_called()
+    assert "cover.kitchen: Cannot refresh the signal of Kitchen" in caplog.text
+    assert "cover.office: Cannot refresh the signal of Office" in caplog.text
+    assert "not connected" in caplog.text
