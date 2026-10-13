@@ -379,3 +379,34 @@ async def test_signal_is_none_after_a_miss_and_back_on_the_next_reply():
         await hub._cancel_background_tasks()
         await fake.stop()
 
+
+
+async def test_query_signal_is_one_sweep_query_and_reports_the_reply():
+    """What the integration's Refresh signal button calls: the sweep's query, on demand."""
+    fake = FakeSerialHub(names={"ABC": "Kitchen", "DEF": "Office"}, silent={"DEF"})
+    hub = await _hub_with_fake(fake, signal_poll_interval=30)
+    try:
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}, "DEF": {"rs": -70}}))
+        await asyncio.wait_for(hub.rollers_known.wait(), 3)
+        await asyncio.wait_for(hub.serial_task, 3)
+        fake.received.clear()
+
+        assert await hub.query_signal("ABC") is True
+        assert fake.received == ["!ABCr?;"]
+        assert hub.rollers["ABC"].signal_reading == -92
+        assert hub.rollers["ABC"].signal_checks == 1 and hub.rollers["ABC"].signal_misses == 0
+
+        assert await hub.query_signal("DEF") is False, "out of range: a miss, like a sweep check"
+        assert fake.received == ["!ABCr?;", "!DEFr?;"]
+        assert hub.rollers["DEF"].signal_reading is None
+        assert hub.rollers["DEF"].signal_misses == 1
+
+        with pytest.raises(KeyError):
+            await hub.query_signal("ZZZ")
+        await fake.stop()
+        with pytest.raises(OSError):
+            await hub.query_signal("ABC")
+    finally:
+        await hub._cancel_background_tasks()
+        if fake.server.is_serving():
+            await fake.stop()

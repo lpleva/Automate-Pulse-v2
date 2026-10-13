@@ -385,14 +385,14 @@ class Hub:
             SERIAL_READ_TIMEOUT,
         )
 
-    async def _serial_query_position(self, rollerid: str) -> None:
+    async def _serial_query_position(self, rollerid: str) -> bool:
         """Ask the motor, live over RF, for its position and signal.
 
         Counts the outcome on the roller. A check is a session that opened; a
         miss is a check that ended (SIGNAL_POLL_REPLY_TIMEOUT of quiet, or the
         hub closing) without this roller's reply. A port that cannot be reached
         at all raises out of _serial_session before anything is counted: that is
-        the hub's problem, not the shade's.
+        the hub's problem, not the shade's. Returns True when the roller replied.
         """
         roller = self.rollers[rollerid]
         before = roller.serial_signal_at
@@ -402,7 +402,8 @@ class Hub:
             done=lambda: roller.serial_signal_at != before,
         )
         roller.signal_checks += 1
-        if roller.serial_signal_at == before:
+        replied = roller.serial_signal_at != before
+        if not replied:
             roller.signal_misses += 1
             roller.signal_missed = True
             _LOGGER.debug(
@@ -415,6 +416,25 @@ class Hub:
         # The counts changed either way (a reply already notified for the
         # reading itself; this is for the counters).
         roller.notify_callback()
+        return replied
+
+    async def query_signal(self, rollerid: str) -> bool:
+        """Ask ONE shade for a live signal (and position) reading right now.
+
+        Exactly what a sweep tick sends for that shade: the serial `!<id>r?;`
+        query on port 1487, nothing else; the reply lands through the same
+        handler, so the roller's signal, position and check counters update as
+        they do for the sweep. Shares the sweep's lock, so it waits out a
+        session in flight rather than opening the port twice. Works whether or
+        not the sweep is on (with it off the hub's cached "rs" is applied again
+        on the next shadow poll). Returns True when the shade replied, False
+        when it did not (a miss, counted like any other). Raises OSError or
+        asyncio.TimeoutError when the serial port cannot be reached, and KeyError
+        for an id this hub does not know.
+        """
+        if rollerid not in self.rollers:
+            raise KeyError(rollerid)
+        return await self._serial_query_position(rollerid)
 
     def signal_stale_after(self) -> float:
         """Seconds after which a live serial reading no longer counts as current."""
