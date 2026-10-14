@@ -215,6 +215,16 @@ class Hub:
         self.sent_details_request = set()
         self.payload_queue = []
         self.json_failures = 0
+        # For a consumer's diagnostics: the hub-level part of the last parsed
+        # shadow (everything but "shades"; the hub sends fields this library does
+        # not use, "onlineLatest" among them) and the time.monotonic() it arrived.
+        # Kept in memory only, never logged. Each Roller keeps its own entry.
+        self.last_shadow_hub: Optional[Dict[str, Any]] = None
+        self.last_shadow_at: Optional[float] = None
+        # Serial sessions that opened the port, and attempts that could not
+        # (refused, no route, connect timeout), since this Hub was built.
+        self.serial_sessions = 0
+        self.serial_open_failures = 0
 
         self.handshake.clear()
         self.update_callbacks: List[Callable] = []
@@ -369,10 +379,15 @@ class Hub:
         """
         async with self.serial_lock:
             await self._pace_serial_session()
-            async with asyncio.timeout(SERIAL_CONNECT_TIMEOUT):
-                reader, writer = await asyncio.open_connection(
-                    self.host, port=self.serial_port
-                )
+            try:
+                async with asyncio.timeout(SERIAL_CONNECT_TIMEOUT):
+                    reader, writer = await asyncio.open_connection(
+                        self.host, port=self.serial_port
+                    )
+            except (OSError, asyncio.TimeoutError):
+                self.serial_open_failures += 1
+                raise
+            self.serial_sessions += 1
             try:
                 for buf in commands:
                     writer.write(buf.encode())
@@ -837,6 +852,10 @@ class Hub:
             "model": model,
         }
         hubchanges = self.applychanges(self, newvals)
+        # A shallow copy of the hub-level fields, for diagnostics; the shades
+        # are kept per roller below, and a truncated one is not kept at all.
+        self.last_shadow_hub = {k: v for k, v in data.items() if k != "shades"}
+        self.last_shadow_at = time.monotonic()
 
         shades = data.get("shades")
         if not isinstance(shades, dict):
@@ -862,6 +881,11 @@ class Hub:
                 self.unknown_rollers.add(rollerid)
                 await self.runserial()
                 hubchanges = True
+            # The whole entry as the hub sent it (keys this library ignores
+            # included), kept before translation so diagnostics can show an
+            # entry the translation could not read.
+            self.rollers[rollerid].last_shadow = dict(roller)
+            self.rollers[rollerid].last_shadow_at = self.last_shadow_at
 
             try:
                 newvals = self._roller_newvals(rollerid, roller)
@@ -1026,6 +1050,11 @@ class Roller:
         self.signal_misses = 0
         self.signal_missed = False
         self.signal_stale = False
+        # This roller's entry in the last parsed shadow, exactly as the hub sent
+        # it (a shallow copy), and the time.monotonic() it arrived; None until
+        # the first one. For diagnostics; never logged.
+        self.last_shadow: Optional[Dict[str, Any]] = None
+        self.last_shadow_at: Optional[float] = None
         self.version = None
         self._moving = False
         self.action = MovingAction.stopped

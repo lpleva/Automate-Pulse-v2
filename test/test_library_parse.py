@@ -369,3 +369,39 @@ def test_hub_poll_interval_floor_and_sweep_off():
     h = Hub(HUB_HOST, poll_interval=60, signal_poll_interval=3)
     assert h.heartbeatinterval == 60
     assert h.signal_poll_interval == devices.MIN_SIGNAL_POLL_INTERVAL
+
+
+# --- the last shadow is kept for diagnostics ---------------------------------------
+
+
+async def test_last_shadow_is_kept_per_roller_and_for_the_hub(hub):
+    """Every field the hub sent, keys the library ignores included; nothing logged."""
+    assert hub.last_shadow_hub is None and hub.last_shadow_at is None
+    await hub.wsconsumer(
+        shadow_message(
+            {"ABC": {"rs": -82, "ol": True, "mp": 30, "ls": True, "ta": 0, "extra": "x"}},
+            onlineLatest=1760300000,
+        )
+    )
+    roller = hub.rollers["ABC"]
+    assert roller.last_shadow == {"rs": -82, "ol": True, "mp": 30, "ls": True, "ta": 0, "extra": "x"}
+    assert roller.last_shadow_at is not None
+    assert hub.last_shadow_hub["onlineLatest"] == 1760300000
+    assert hub.last_shadow_hub["hubId"] == HUB_ID
+    assert "shades" not in hub.last_shadow_hub
+    assert hub.last_shadow_at == roller.last_shadow_at
+    # A copy, not the parsed message's own dict
+    first = roller.last_shadow
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -80}}))
+    assert roller.last_shadow == {"rs": -80}
+    assert first == {"rs": -82, "ol": True, "mp": 30, "ls": True, "ta": 0, "extra": "x"}
+
+
+async def test_a_shade_cut_in_half_keeps_its_previous_shadow(hub):
+    """The skipped shade's entry may be partial, so it is not kept either."""
+    await hub.wsconsumer(_msg({"A": {"rs": -82, "mp": 20}, "B": {"rs": -70, "mp": 100}}))
+    full = _msg({"A": {"rs": -82, "mp": 21}, "B": {"rs": -70, "mp": 10}})
+    cut = full[: full.rindex("10") + 1]
+    await hub.wsconsumer(cut)
+    assert hub.rollers["A"].last_shadow == {"rs": -82, "mp": 21}
+    assert hub.rollers["B"].last_shadow == {"rs": -70, "mp": 100}, "the cut entry was not kept"

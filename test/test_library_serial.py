@@ -482,3 +482,28 @@ async def test_serial_sessions_are_spaced_whoever_asks(monkeypatch):
     finally:
         await hub._cancel_background_tasks()
         await fake.stop()
+
+
+async def test_serial_sessions_and_open_failures_are_counted():
+    """For diagnostics: how many sessions opened the port and how many could not."""
+    fake = FakeSerialHub(names={"ABC": "Kitchen"})
+    hub = await _hub_with_fake(fake)
+    try:
+        assert hub.serial_sessions == 0 and hub.serial_open_failures == 0
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -82}}))
+        await asyncio.wait_for(hub.rollers_known.wait(), 3)
+        await asyncio.wait_for(hub.serial_task, 3)
+        assert hub.serial_sessions == 1
+        await hub.query_signal("ABC")
+        assert hub.serial_sessions == 2
+        assert hub.serial_open_failures == 0
+
+        port = hub.serial_port
+        await fake.stop()  # nothing listens now
+        with pytest.raises(OSError):
+            await hub.query_signal("ABC")
+        assert hub.serial_sessions == 2
+        assert hub.serial_open_failures == 1
+        hub.serial_port = port  # unused after this; keeps the finally simple
+    finally:
+        await hub._cancel_background_tasks()

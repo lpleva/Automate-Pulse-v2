@@ -134,6 +134,17 @@ The package needed no import rewrite: it already used relative imports.
     A session that never opened records no end time. This is what the
     integration's Refresh signal button and `automate.refresh_signal` action
     call.
+16. **The last shadow is kept, and serial sessions are counted, for
+    diagnostics.** `wsconsumer` stores a shallow copy of the hub-level part of
+    each parsed shadow (every key but `shades`, so fields the library never
+    reads, `onlineLatest` among them, are there) in `Hub.last_shadow_hub`, and
+    each shade's whole entry in `Roller.last_shadow`, both with a
+    `time.monotonic()` stamp (`last_shadow_at`); a shade skipped as cut off in
+    a truncated message keeps its previous copy. `_serial_session` counts the
+    sessions that opened the port (`serial_sessions`) and the attempts that
+    could not (`serial_open_failures`: refused, no route, connect timeout),
+    then re-raises as before. Memory only, one small dict per shade; nothing
+    new is logged. The integration's `diagnostics.py` reads these.
 
 `__init__.py`: exports `HubBaseException`; `__version__` is `1.0.0+lpleva`.
 `const.py`, `errors.py`: unchanged.
@@ -161,5 +172,5 @@ The package needed no import rewrite: it already used relative imports.
 ## Re-applying on a newer upstream
 
 Diff upstream's new release against the `v1.0.0` tag, then re-apply the
-fifteen changes above on top; the tests in `test/test_library_*.py` are the
+sixteen changes above on top; the tests in `test/test_library_*.py` are the
 acceptance suite. Upstream `main` has no tests of its own.
