@@ -9,10 +9,14 @@ shade's device page.
 
 The hub's shadow carries fields this integration does not use, and some of
 them a user would not want in a file they attach to a bug report (the hub's
-Wi-Fi details, cloud tokens, where the house is). TO_REDACT names every key
-that is or could be one of those; when in doubt a key is in. The hub's MAC and
-LAN address stay: both are needed to tell two hubs apart and neither leaves
-the LAN.
+Wi-Fi details, cloud tokens, where the house is). Two guards, in this order:
+only the fields named in SHADE_SHADOW_KEYS and HUB_SHADOW_KEYS pass through
+with their values; every other field keeps its name and gets a marker with
+its type and size only ("<unknown field: str, 24 chars>"), so a field nobody
+has seen yet can never leak. Then TO_REDACT runs over the whole output, at any
+depth, for sensitive keys inside the fields that did pass (the firmware and
+Matter objects are dicts). The hub's MAC and LAN address stay: both are needed
+to tell two hubs apart and neither leaves the LAN.
 """
 
 from __future__ import annotations
@@ -90,6 +94,11 @@ TO_REDACT = {
     "thingName",
 }
 
+# Shadow fields passed through with their values. Anything else is shown as a
+# marker: its name, type and size, never its value.
+SHADE_SHADOW_KEYS = {"mp", "rs", "ol", "vo", "ta", "is", "ls"}
+HUB_SHADOW_KEYS = {"hubId", "mac", "name", "firmware", "mfi", "matter", "onlineLatest"}
+
 # Each shade's entities, by the unique-id suffix the platforms mint.
 _SHADE_ENTITIES = (
     ("cover", "cover", ""),
@@ -105,6 +114,24 @@ def _age(now: float, at: float | None) -> float | None:
     if at is None:
         return None
     return round(now - at, 1)
+
+
+def _unknown_marker(value: Any) -> str:
+    """What an unlisted shadow field is shown as: its type and size, never its value."""
+    if isinstance(value, str):
+        return f"<unknown field: str, {len(value)} chars>"
+    if isinstance(value, dict):
+        return f"<unknown field: dict, {len(value)} keys>"
+    if isinstance(value, list):
+        return f"<unknown field: list, {len(value)} items>"
+    return f"<unknown field: {type(value).__name__}>"
+
+
+def _allowed_shadow(shadow: dict[str, Any] | None, allowed: set[str]) -> dict[str, Any] | None:
+    """The shadow with only the allowed fields' values; the rest as markers."""
+    if shadow is None:
+        return None
+    return {k: v if k in allowed else _unknown_marker(v) for k, v in shadow.items()}
 
 
 def _decode_vo(vo: Any) -> dict[str, Any] | None:
@@ -183,7 +210,7 @@ def _hub_section(hub: PulseHub, now: float) -> dict[str, Any]:
             "seconds_since_last_session": _age(now, api._serial_session_ended_at),
             "queries_in_flight": sorted(api._signal_queries),
         },
-        "shadow": shadow,
+        "shadow": _allowed_shadow(shadow, HUB_SHADOW_KEYS),
         "shadow_age_s": _age(now, api.last_shadow_at),
     }
 
@@ -235,7 +262,7 @@ def _shade_section(
             "firmware_version": roller.version,
             "vo": _decode_vo(shadow.get("vo")) if shadow else None,
         },
-        "shadow": shadow,
+        "shadow": _allowed_shadow(shadow, SHADE_SHADOW_KEYS),
         "shadow_age_s": _age(now, roller.last_shadow_at),
     }
 
@@ -277,7 +304,7 @@ async def async_get_device_diagnostics(
     if not ours:
         return {
             "error": "not one of this integration's devices",
-            "identifiers": sorted(device.identifiers),
+            "identifiers": [list(i) for i in device.identifiers],
         }
     ident = ours[0]
     if hub.api is not None and ident == str(hub.api.id):

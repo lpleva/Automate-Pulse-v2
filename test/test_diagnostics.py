@@ -33,7 +33,10 @@ SECRETS = {
     "lon": -88.31,
     "serialNumber": "SN-0001",
     "token": "shade-token-9",
+    "passcode": "20202021",
+    "cloudUrl": "https://api.example.com/sync?token=abc123secret",
 }
+UNKNOWN_URL = f"<unknown field: str, {len(SECRETS['cloudUrl'])} chars>"
 
 KITCHEN = {
     "rs": -82,
@@ -45,17 +48,23 @@ KITCHEN = {
     "ta": 0,  # tilt
     "somethingNew": {"the hub": "may send fields this integration never reads"},
     "token": SECRETS["token"],
+    "cloudUrl": SECRETS["cloudUrl"],  # an unlisted key whose value carries a secret
 }
 OFFICE = {"rs": -70, "ol": True, "mp": 0, "is": True}
 
 HUB_EXTRAS = {
     "onlineLatest": 1760300000,
+    # Secrets inside the two allowed dicts: the redaction must reach into them
+    "firmware": {"version": "1.3.0", "RFversion": "1.0", "jwt": SECRETS["jwt"]},
+    "matter": {"vendorID": 4938, "productID": 1, "passcode": SECRETS["passcode"]},
+    # Unlisted keys: name and type only, whatever TO_REDACT says
     "wifi": {"ssid": SECRETS["ssid"], "password": SECRETS["password"]},
-    "jwt": SECRETS["jwt"],
     "timezone": SECRETS["timezone"],
     "lat": SECRETS["lat"],
     "lon": SECRETS["lon"],
     "serialNumber": SECRETS["serialNumber"],
+    "cloudUrl": SECRETS["cloudUrl"],
+    "uptime": 86400,
 }
 
 
@@ -90,7 +99,7 @@ async def test_config_entry_diagnostics_cover_the_hub_and_every_shade(hass, hass
     assert hub_diag["mac"] == HUB_MAC, "the MAC is kept"
     assert hub_diag["model"] == "Pulse Pro Hub"
     assert hub_diag["firmware_version"] == "1.3.0"
-    assert hub_diag["matter"] == {"vendorID": 4938, "productID": 1}
+    assert hub_diag["matter"] == {"vendorID": 4938, "productID": 1, "passcode": REDACTED}
     assert hub_diag["online_latest"] == HUB_EXTRAS["onlineLatest"]
     assert hub_diag["library_version"] == "1.0.0+lpleva"
     assert hub_diag["connection"]["connected"] is True
@@ -167,11 +176,18 @@ async def test_the_shadow_passes_through_with_every_field_the_hub_sent(hass, has
     assert shadow["ls"] is True
     assert shadow["ta"] == 0
     assert shadow["is"] is True
-    assert shadow["somethingNew"] == KITCHEN["somethingNew"]
-    assert set(shadow) == set(KITCHEN), "the whole entry, not just the keys the library reads"
+    assert set(shadow) == set(KITCHEN), "every key is listed, even the ones the library never reads"
+    # Keys outside the allow-list: name, type and size only, never the value;
+    # one that is also in TO_REDACT ends as REDACTED, since that pass runs last.
+    assert shadow["somethingNew"] == "<unknown field: dict, 1 keys>"
+    assert shadow["cloudUrl"] == UNKNOWN_URL
+    assert shadow["token"] == REDACTED
     assert diag["shades"]["DEF"]["shadow"] == OFFICE
-    assert diag["hub"]["shadow"]["onlineLatest"] == HUB_EXTRAS["onlineLatest"]
-    assert diag["hub"]["shadow"]["firmware"] == {"version": "1.3.0", "RFversion": "1.0"}
+    hub_shadow = diag["hub"]["shadow"]
+    assert hub_shadow["onlineLatest"] == HUB_EXTRAS["onlineLatest"]
+    assert hub_shadow["firmware"] == {"version": "1.3.0", "RFversion": "1.0", "jwt": REDACTED}
+    assert hub_shadow["uptime"] == "<unknown field: int>"
+    assert hub_shadow["wifi"] == REDACTED
 
     # A later poll replaces it; a poll that leaves a shade out leaves its copy alone
     await feed(hass, hub, {"ABC": {"rs": -80, "ol": True}})
@@ -186,11 +202,16 @@ async def test_sensitive_fields_are_redacted_wherever_they_appear(hass, hass_cli
     diag = await get_diagnostics_for_config_entry(hass, hass_client, config_entry)
 
     hub_shadow = diag["hub"]["shadow"]
-    assert hub_shadow["wifi"] == REDACTED, "the whole wifi object, ssid and password inside it"
-    assert hub_shadow["jwt"] == REDACTED
-    assert hub_shadow["timezone"] == REDACTED
-    assert hub_shadow["lat"] == REDACTED and hub_shadow["lon"] == REDACTED
-    assert hub_shadow["serialNumber"] == REDACTED
+    # Inside the allowed dicts, TO_REDACT does the work
+    assert hub_shadow["firmware"]["jwt"] == REDACTED
+    assert hub_shadow["matter"]["passcode"] == REDACTED
+    # Outside the allow-list the marker does; a key TO_REDACT also names ends as
+    # REDACTED because that pass runs last. Either way the value is gone.
+    for key in ("wifi", "timezone", "lat", "lon", "serialNumber"):
+        assert hub_shadow[key] == REDACTED, key
+    assert hub_shadow["cloudUrl"] == UNKNOWN_URL, "a URL with a token in it shows as its length only"
+    assert hub_shadow["uptime"] == "<unknown field: int>"
+    assert diag["shades"]["ABC"]["shadow"]["cloudUrl"] == UNKNOWN_URL
     assert diag["shades"]["ABC"]["shadow"]["token"] == REDACTED
     # Kept on purpose: both are LAN-only and both are needed to tell hubs apart
     assert diag["hub"]["mac"] == HUB_MAC
@@ -235,9 +256,10 @@ async def test_device_diagnostics_for_a_shade_and_for_the_hub(hass, hass_client,
     assert set(diag["shades"]) == {"ABC"}, "that shade only"
     assert diag["shades"]["ABC"]["entities"]["cover"] == "cover.kitchen"
     assert diag["hub"]["id"] == HUB_ID
-    assert diag["hub"]["shadow"]["jwt"] == REDACTED
+    assert diag["hub"]["shadow"]["firmware"]["jwt"] == REDACTED
+    assert diag["hub"]["shadow"]["cloudUrl"] == UNKNOWN_URL
 
-    hub_device = dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id)
+    hub_device =dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id)
     diag = await get_diagnostics_for_device(hass, hass_client, config_entry, hub_device)
     assert diag["shades"] == {}
     assert diag["shade_ids"] == ["ABC", "DEF"]

@@ -140,7 +140,10 @@ The package needed no import rewrite: it already used relative imports.
     reads, `onlineLatest` among them, are there) in `Hub.last_shadow_hub`, and
     each shade's whole entry in `Roller.last_shadow`, both with a
     `time.monotonic()` stamp (`last_shadow_at`); a shade skipped as cut off in
-    a truncated message keeps its previous copy. `_serial_session` counts the
+    a truncated message keeps its previous copy, and a message whose braces
+    had to be restored (`_repair_truncated_json` now also returns whether it
+    repaired) is merged into `last_shadow_hub` rather than replacing it, since
+    the tail of a truncated message may have lost keys. `_serial_session` counts the
     sessions that opened the port (`serial_sessions`) and the attempts that
     could not (`serial_open_failures`: refused, no route, connect timeout),
     then re-raises as before. Memory only, one small dict per shade; nothing

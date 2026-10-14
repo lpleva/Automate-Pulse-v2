@@ -175,31 +175,35 @@ def _msg(shades, trailing=None):
 def test_repair_missing_final_brace_keeps_every_shade():
     """The Pro drops exactly the final brace (aiopulse2 #15): nothing is suspect."""
     full = _msg({"A": {"rs": -82}, "B": {"rs": -70}})
-    parsed, suspect = devices._repair_truncated_json(full[:-1])
+    parsed, suspect, repaired = devices._repair_truncated_json(full[:-1])
     assert parsed["result"]["reported"]["shades"] == {"A": {"rs": -82}, "B": {"rs": -70}}
     assert suspect is False
+    assert repaired is True
+    assert devices._repair_truncated_json(full) == (json.loads(full), False, False)
 
 
 def test_repair_missing_two_braces_shades_last_member():
     """shades is the last member and both its brace and the outer one are gone."""
     full = _msg({"A": {"rs": -82}, "B": {"rs": -70}})
-    parsed, suspect = devices._repair_truncated_json(full[:-2])
+    parsed, suspect, repaired = devices._repair_truncated_json(full[:-2])
     assert parsed["result"]["reported"]["shades"]["B"] == {"rs": -70}
     assert suspect is False
+    assert repaired is True
 
 
 def test_repair_cut_inside_a_shade_flags_it():
     full = _msg({"A": {"rs": -82}, "B": {"rs": -70}})
     cut = full[: full.index('"B": {"rs": -70}') + len('"B": {"rs": -70')]
-    parsed, suspect = devices._repair_truncated_json(cut)
+    parsed, suspect, repaired = devices._repair_truncated_json(cut)
     assert parsed is not None
     assert suspect is True
+    assert repaired is True
 
 
 def test_repair_gives_up_on_a_cut_inside_a_value():
     full = _msg({"A": {"rs": -82}})
     cut = full[: full.index("-82") + 1]  # ends in "-"
-    assert devices._repair_truncated_json(cut) == (None, False)
+    assert devices._repair_truncated_json(cut) == (None, False, False)
 
 
 async def test_wsconsumer_skips_the_shade_cut_in_half(hub):
@@ -405,3 +409,22 @@ async def test_a_shade_cut_in_half_keeps_its_previous_shadow(hub):
     await hub.wsconsumer(cut)
     assert hub.rollers["A"].last_shadow == {"rs": -82, "mp": 21}
     assert hub.rollers["B"].last_shadow == {"rs": -70, "mp": 100}, "the cut entry was not kept"
+
+
+async def test_a_repaired_message_merges_into_the_hub_level_shadow(hub):
+    """A truncated message may have lost hub-level keys at its tail: keep the old ones.
+
+    A whole message replaces the copy outright, so a key the hub stops sending
+    does not linger forever.
+    """
+    await hub.wsconsumer(_msg({"A": {"rs": -82}}, trailing={"onlineLatest": 5, "mfi": {"model": "P"}}))
+    assert hub.last_shadow_hub["onlineLatest"] == 5
+
+    cut = _msg({"A": {"rs": -80}}, trailing={"mfi": {"model": "P"}})[:-1]  # final brace gone
+    await hub.wsconsumer(cut)
+    assert hub.rollers["A"].last_shadow == {"rs": -80}, "the shades still update"
+    assert hub.last_shadow_hub["onlineLatest"] == 5, "merged: the key the cut dropped is kept"
+    assert hub.last_shadow_hub["mfi"] == {"model": "P"}
+
+    await hub.wsconsumer(_msg({"A": {"rs": -81}}, trailing={"mfi": {"model": "P"}}))
+    assert "onlineLatest" not in hub.last_shadow_hub, "a whole message replaces the copy"

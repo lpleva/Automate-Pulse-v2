@@ -498,12 +498,10 @@ async def test_serial_sessions_and_open_failures_are_counted():
         assert hub.serial_sessions == 2
         assert hub.serial_open_failures == 0
 
-        port = hub.serial_port
         await fake.stop()  # nothing listens now
         with pytest.raises(OSError):
             await hub.query_signal("ABC")
         assert hub.serial_sessions == 2
         assert hub.serial_open_failures == 1
-        hub.serial_port = port  # unused after this; keeps the finally simple
     finally:
         await hub._cancel_background_tasks()

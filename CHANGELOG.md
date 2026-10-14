@@ -21,12 +21,16 @@ merges upstream into it and the delta is audited before it reaches `main`.
   its five entity ids, online, position with the live-reading rule in effect,
   signal as stored and as the sensor shows it with the live reading's age,
   the check and miss counters, battery voltage and percent, the `vo` string
-  decoded into volts, motor type and motor firmware, and the shade's whole
-  last shadow entry as the hub sent it, `ls`, `ta`, `is` and any field this
-  integration does not read included). Fields that could identify the house
-  or the account are redacted wherever they appear (Wi-Fi name and password,
+  decoded into volts, motor type and motor firmware, and the shade's last
+  shadow entry). The shadow sections are allow-listed: per shade only `mp`,
+  `rs`, `ol`, `vo`, `ta`, `is` and `ls` pass through with their values, at
+  hub level only `hubId`, `mac`, `name`, `firmware`, `mfi`, `matter` and
+  `onlineLatest`; unknown fields are listed by name and type only, never their
+  values (`"wifi": "<unknown field: dict, 2 keys>"`), so a field nobody has
+  seen yet cannot leak. On top of that, sensitive keys are redacted wherever
+  they appear inside the fields that did pass (Wi-Fi name and password,
   tokens and keys, latitude, longitude and timezone, serial numbers, account
-  ids; the full list is `TO_REDACT` in `diagnostics.py`); the MAC and the LAN
+  ids; the full list is `TO_REDACT` in `diagnostics.py`). The MAC and the LAN
   address are kept, since both stay on the LAN and both are needed to tell two
   hubs apart.
 - In the library, each shade keeps a copy of its last parsed shadow entry and
@@ -34,21 +38,24 @@ merges upstream into it and the delta is audited before it reaches `main`.
   `Hub.last_shadow_hub`, each with a `_at` timestamp), and the hub counts
   serial sessions that opened the port and attempts that could not
   (`serial_sessions`, `serial_open_failures`). Kept in memory only, never
-  logged; a shade cut off in a truncated message keeps its previous copy.
+  logged. A shade cut off in a truncated message keeps its previous copy, and
+  a message whose braces had to be restored is merged into the hub-level copy
+  rather than replacing it, since its tail may have lost keys.
 
 ### Testing
 
-- 86 tests (77 before): the diagnostics through Home Assistant's own
+- 87 tests (77 before): the diagnostics through Home Assistant's own
   endpoint for a hub with two shades (every section and the entity ids), the
-  shadow passing through with fields the integration never reads, redaction
-  of Wi-Fi, token, timezone, coordinates and serial number with the MAC and
-  host kept and no secret string anywhere in the JSON, no network call during
-  the download (the library's serial, websocket and send paths all patched
-  and never called), the per-device variants for a shade and for the hub, and
-  a download before the hub has reported anything; in the library, the kept
+  allowed shadow fields passing through and unknown ones showing as type and
+  size only (a URL carrying a token among them), redaction of a token and a
+  passcode inside the firmware and Matter objects with the MAC and host kept
+  and no secret string anywhere in the JSON, no network call during the
+  download (the library's serial, websocket and send paths all patched and
+  never called), the per-device variants for a shade and for the hub, and a
+  download before the hub has reported anything; in the library, the kept
   shadow per roller and for the hub, a truncated shade keeping its previous
-  copy, and the serial session and open-failure counters against the fake
-  port.
+  copy, a repaired message merging into the hub-level copy, and the serial
+  session and open-failure counters against the fake port.
 
 ## 1.3.0 (2026-10-13)
 

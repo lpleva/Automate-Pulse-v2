@@ -112,25 +112,26 @@ def next_backoff(current: float, minimum: float, maximum: float) -> float:
 def _repair_truncated_json(msg: str):
     """Parse a hub message, repairing the Pulse Pro's truncation if needed.
 
-    Returns (parsed, truncated_shade_suspect) or (None, False) when the message
-    cannot be parsed. Pulse Pro hubs (firmware 1.1.0 onwards) drop the final
-    closing brace(s) of every shadow response; appending them restores the document.
+    Returns (parsed, truncated_shade_suspect, repaired), or (None, False, False)
+    when the message cannot be parsed. Pulse Pro hubs (firmware 1.1.0 onwards)
+    drop the final closing brace(s) of every shadow response; appending them
+    restores the document, and the third value is True when that was needed.
     When the cut falls INSIDE a shade's own object (the shades container and at
     least one shade are both unterminated) the last shade's values may be partial,
     and the second return value is True so the caller can skip that shade.
     """
     try:
-        return json.loads(msg), False
+        return json.loads(msg), False, False
     except json.JSONDecodeError as e:
         _LOGGER.debug("Invalid JSON received: %s", e)
 
     missing_braces = msg.count("{") - msg.count("}")
     if missing_braces <= 0:
-        return None, False
+        return None, False, False
     try:
         parsed = json.loads(msg + "}" * missing_braces)
     except json.JSONDecodeError:
-        return None, False
+        return None, False, False
     _LOGGER.debug("Repaired truncated JSON by adding %d closing brace(s)", missing_braces)
 
     suspect = False
@@ -141,7 +142,7 @@ def _repair_truncated_json(msg: str):
         # depth 1: only the shades container is unterminated, every shade is whole.
         # depth 2+: a shade's own object was cut, so its last value may be partial.
         suspect = open_depth >= 2
-    return parsed, suspect
+    return parsed, suspect, True
 
 
 class Hub:
@@ -805,7 +806,7 @@ class Hub:
         return newvals
 
     async def wsconsumer(self, msg: str):
-        jsmsg, truncated_shade_suspect = _repair_truncated_json(msg)
+        jsmsg, truncated_shade_suspect, repaired = _repair_truncated_json(msg)
         if jsmsg is None:
             self.json_failures += 1
             if self.json_failures == 1:
@@ -853,8 +854,14 @@ class Hub:
         }
         hubchanges = self.applychanges(self, newvals)
         # A shallow copy of the hub-level fields, for diagnostics; the shades
-        # are kept per roller below, and a truncated one is not kept at all.
-        self.last_shadow_hub = {k: v for k, v in data.items() if k != "shades"}
+        # are kept per roller below, and a truncated one is not kept at all. A
+        # message that needed its braces restored may have lost hub-level keys
+        # at its tail, so it is merged into the copy rather than replacing it.
+        hub_fields = {k: v for k, v in data.items() if k != "shades"}
+        if repaired and self.last_shadow_hub:
+            self.last_shadow_hub = {**self.last_shadow_hub, **hub_fields}
+        else:
+            self.last_shadow_hub = hub_fields
         self.last_shadow_at = time.monotonic()
 
         shades = data.get("shades")
