@@ -86,3 +86,7 @@ logger:
 ```
 
 Then restart Home Assistant and check the logs for any errors and/or provide for debugging.
+
+## Download diagnostics (this fork)
+
+Settings, Devices & services, Automate Pulse Hub v2, the three-dot menu, **Download diagnostics** gives a JSON file of everything the integration holds in memory: the hub (identity, connection state, poll and sweep settings, the serial port's state and session counts, and the hub-level part of the last shadow as received) and every shade (entity ids, position, signal as stored and as the sensor shows it, the check and miss counters, battery, the `vo` string decoded, and the shade's whole last shadow entry, fields this integration does not read included). A shade's device page gives the same for that one shade. It is read-only and asks the hub for nothing: downloading it never touches the websocket or the serial port. Wi-Fi details, tokens, coordinates, timezone, serial numbers and account ids are redacted wherever they appear; the hub's MAC and LAN address are kept.

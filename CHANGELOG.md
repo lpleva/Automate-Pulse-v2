@@ -7,6 +7,51 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ## Unreleased
 
+### Added
+
+- **Download diagnostics.** Settings, Devices & services, Automate Pulse Hub
+  v2, the three-dot menu, Download diagnostics gives a JSON file of what the
+  integration holds in memory; a shade's device page gives the same for that
+  one shade. Read-only: nothing in it comes from a new request to the hub, so
+  downloading it never touches the websocket or the serial port. It carries
+  the hub (id, name, LAN address and MAC, model, firmware, the Matter ids, the
+  hub's `onlineLatest`, connection state, the poll and sweep settings, the
+  serial port's state and how many sessions opened it or could not, and the
+  hub-level part of the last shadow as received) and every shade (id, name,
+  its five entity ids, online, position with the live-reading rule in effect,
+  signal as stored and as the sensor shows it with the live reading's age,
+  the check and miss counters, battery voltage and percent, the `vo` string
+  decoded into volts, motor type and motor firmware, and the shade's whole
+  last shadow entry as the hub sent it, `ls`, `ta`, `is` and any field this
+  integration does not read included). Fields that could identify the house
+  or the account are redacted wherever they appear (Wi-Fi name and password,
+  tokens and keys, latitude, longitude and timezone, serial numbers, account
+  ids; the full list is `TO_REDACT` in `diagnostics.py`); the MAC and the LAN
+  address are kept, since both stay on the LAN and both are needed to tell two
+  hubs apart.
+- In the library, each shade keeps a copy of its last parsed shadow entry and
+  the hub keeps the hub-level fields (`Roller.last_shadow`,
+  `Hub.last_shadow_hub`, each with a `_at` timestamp), and the hub counts
+  serial sessions that opened the port and attempts that could not
+  (`serial_sessions`, `serial_open_failures`). Kept in memory only, never
+  logged; a shade cut off in a truncated message keeps its previous copy.
+
+### Testing
+
+- 86 tests (77 before): the diagnostics through Home Assistant's own
+  endpoint for a hub with two shades (every section and the entity ids), the
+  shadow passing through with fields the integration never reads, redaction
+  of Wi-Fi, token, timezone, coordinates and serial number with the MAC and
+  host kept and no secret string anywhere in the JSON, no network call during
+  the download (the library's serial, websocket and send paths all patched
+  and never called), the per-device variants for a shade and for the hub, and
+  a download before the hub has reported anything; in the library, the kept
+  shadow per roller and for the hub, a truncated shade keeping its previous
+  copy, and the serial session and open-failure counters against the fake
+  port.
+
+## 1.3.0 (2026-10-13)
+
 A live signal reading on demand, for one shade or several, without waiting for
 the sweep to come round (at 30 s with eight shades, up to four minutes).
 
