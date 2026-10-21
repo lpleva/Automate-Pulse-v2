@@ -62,6 +62,18 @@ query is still pending share its answer, so neither a card nor an automation
 can flood the hub's radio. With the sweep off the live reading shows until the
 next hub poll puts the hub's cached value back.
 
+## Delete a stale shade device (this fork)
+
+A shade you unpaired in the Pulse app, or moved to another hub, keeps its
+device in Home Assistant after a restart: the hub never names it again, so
+nothing removes it. Open the device (Settings, Devices & services, the device,
+the three-dot menu) and **Delete** it. The integration allows this only for a
+shade this hub no longer reports; the hub's own device and any shade the hub
+still lists cannot be deleted (Home Assistant would recreate it on the next
+update), and nothing can be deleted while the integration is not loaded or the
+hub has not yet reported since Home Assistant started. With two hubs, a shade that is live on one hub does not protect
+its old device on the other.
+
 ## Caveats
 
 If the IP address for the hub changes, you will need to re-register it with Home Assistant again. To avoid this, set up a DHCP reservation on your router for your hub so that it always has the same IP address.
