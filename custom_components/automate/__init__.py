@@ -5,6 +5,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
@@ -66,3 +67,60 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device: DeviceEntry
+) -> bool:
+    """Allow Settings > Devices > Delete on a device this hub no longer reports.
+
+    A shade unpaired in the Pulse app, or moved to another hub, leaves its device
+    behind after a restart: the hub never lists it again, so nothing removes it.
+    This lets the user delete it. Refused for the hub's own device and for any
+    shade the hub still reports (HA would recreate that one on the next update,
+    and the user would lose its customisations), and refused whenever this
+    entry's hub is not loaded or has not reported yet, since then there is no
+    live list to check against.
+
+    Every device of this integration carries one `(DOMAIN, <id>)` identifier,
+    the hub's `str(hub.id)` or the shade's roller id. Devices belong to one
+    config entry each, so an id that is live on ANOTHER hub's entry does not
+    keep this entry's device; only this entry's hub is consulted.
+    """
+    hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if hub is None or hub.api is None or not hub.api.id:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the hub of entry %s is not loaded "
+            "or has not reported yet",
+            device.id,
+            entry.entry_id,
+        )
+        return False
+
+    ours = {ident for domain, ident in device.identifiers if domain == DOMAIN}
+    if not ours:
+        _LOGGER.debug(
+            "Refusing to remove device %s: none of %s is one of this "
+            "integration's identifiers",
+            device.id,
+            sorted(device.identifiers),
+        )
+        return False
+    if str(hub.api.id) in ours:
+        _LOGGER.debug("Refusing to remove device %s: it is the hub itself", device.id)
+        return False
+    live = ours & set(hub.api.rollers)
+    if live:
+        _LOGGER.debug(
+            "Refusing to remove device %s: shade %s is still reported by the hub",
+            device.id,
+            sorted(live),
+        )
+        return False
+    _LOGGER.info(
+        "Removing device %s (%s): the hub no longer reports shade %s",
+        device.id,
+        device.name_by_user or device.name,
+        sorted(ours),
+    )
+    return True
