@@ -65,14 +65,17 @@ next hub poll puts the hub's cached value back.
 ## Delete a stale shade device (this fork)
 
 A shade you unpaired in the Pulse app, or moved to another hub, keeps its
-device in Home Assistant after a restart: the hub never names it again, so
-nothing removes it. Open the device (Settings, Devices & services, the device,
-the three-dot menu) and **Delete** it. The integration allows this only for a
-shade this hub no longer reports; the hub's own device and any shade the hub
-still lists cannot be deleted (Home Assistant would recreate it on the next
-update), and nothing can be deleted while the integration is not loaded or the
-hub has not yet reported since Home Assistant started. With two hubs, a shade that is live on one hub does not protect
-its old device on the other.
+device in Home Assistant: before this fork nothing ever removed one. Open the
+device (Settings, Devices & services, the device, the three-dot menu) and
+**Delete** it. Delete is offered only for a device that has no entities and
+that this hub no longer reports. The hub's own device cannot be deleted, nor
+can a shade the hub still lists (Home Assistant would recreate it on the next
+update), nor a device that still has entities (right after a restart a cut-off
+first report can leave a live shade out of the hub's list for a few seconds;
+its cover and sensors are what tell it from one left behind). Nothing can be
+deleted while the integration is not loaded or the hub has not yet reported
+since Home Assistant started. With two hubs, a shade that is live on one hub
+does not protect its old device on the other.
 
 ## Caveats
 

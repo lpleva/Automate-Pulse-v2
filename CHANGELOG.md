@@ -12,26 +12,32 @@ merges upstream into it and the delta is audited before it reaches `main`.
 - **Delete a stale shade device.** Settings, Devices & services, the device,
   the three-dot menu, Delete now works for a shade this hub no longer reports:
   one unpaired in the Pulse app, or moved to another hub, whose device stayed
-  behind after a restart because the hub never named it again and nothing
-  removed it (the integration only removes a shade when it sees it drop out of
-  a running hub's list). Home Assistant asks the integration first, and the
-  answer is no for the hub's own device and for any shade the hub still lists
-  (deleting that one would only have it recreated on the next update, with its
-  entity customisations lost); no, too, while the entry's hub is not loaded or
-  has not reported yet, since then there is no live list to check against. The
-  check is against this entry's hub only: a device belongs to one config entry,
-  so a motor that is live on another hub's entry does not keep its old device
-  on this one. Read-only: it looks at the shade list already in memory and
-  asks the hub for nothing.
+  behind. Before this, nothing ever removed a shade's device: the library never
+  drops a shade from its list, so the integration's own removal path never ran.
+  Delete is offered only for a device that has no entities and that this hub
+  does not report. Home Assistant asks the integration first, and the answer
+  is no for the hub's own device, for any shade the hub still lists (deleting
+  that one would only have it recreated on the next update, with its entity
+  customisations lost), and for any device that still has entity registry
+  entries under this entry: right after a restart a truncated first shadow can
+  leave a live shade out of the hub's list for a poll or two, and its cover and
+  sensors are what tell it apart from a device left behind, which has none.
+  No, too, while the entry's hub is not loaded or has not reported yet, since
+  then there is no live list to check against. The check is against this
+  entry's hub only: a device belongs to one config entry, so a motor that is
+  live on another hub's entry does not keep its old device on this one.
+  Read-only: it looks at the shade list and the registries already in memory
+  and asks the hub for nothing.
 
 ### Testing
 
-- 93 tests (87 before): a live shade and the hub device are rejected through
+- 94 tests (87 before): a live shade and the hub device are rejected through
   Home Assistant's own device-removal command and stay registered; a stale
   device is deleted and the next hub update does not bring it back, with the
-  live shade and the hub untouched; refused before the hub's first report,
-  after the entry is unloaded and with the library object gone, without
-  raising; a device carrying none of this integration's identifiers is
+  live shade and the hub untouched; a shade missing from the hub's list that
+  still has its entities is rejected and keeps them; refused before the hub's
+  first report, after the entry is unloaded and with the library object gone,
+  without raising; a device carrying none of this integration's identifiers is
   refused; two hubs, where the moved shades' stale copies on the first entry
   go while the live ones on the second entry, with the same ids, stay.
 
