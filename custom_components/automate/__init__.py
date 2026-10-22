@@ -5,6 +5,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 
@@ -78,9 +79,12 @@ async def async_remove_config_entry_device(
     behind after a restart: the hub never lists it again, so nothing removes it.
     This lets the user delete it. Refused for the hub's own device and for any
     shade the hub still reports (HA would recreate that one on the next update,
-    and the user would lose its customisations), and refused whenever this
-    entry's hub is not loaded or has not reported yet, since then there is no
-    live list to check against.
+    and the user would lose its customisations), refused for a device that still
+    has entity registry entries under this entry (a live shade whose roller is
+    missing from the list for a moment, as after a truncated first shadow on
+    restart, still has its cover and sensors; a device left behind has none),
+    and refused whenever this entry's hub is not loaded or has not reported yet,
+    since then there is no live list to check against.
 
     Every device of this integration carries one `(DOMAIN, <id>)` identifier,
     the hub's `str(hub.id)` or the shade's roller id. Devices belong to one
@@ -115,6 +119,21 @@ async def async_remove_config_entry_device(
             "Refusing to remove device %s: shade %s is still reported by the hub",
             device.id,
             sorted(live),
+        )
+        return False
+    entities = [
+        e
+        for e in er.async_entries_for_device(
+            er.async_get(hass), device.id, include_disabled_entities=True
+        )
+        if e.config_entry_id == entry.entry_id
+    ]
+    if entities:
+        _LOGGER.debug(
+            "Refusing to remove device %s: it still has entities (%s), so the "
+            "shade is live even though the hub's list is missing it right now",
+            device.id,
+            sorted(e.entity_id for e in entities),
         )
         return False
     _LOGGER.info(

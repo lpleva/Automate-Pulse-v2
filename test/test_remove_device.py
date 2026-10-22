@@ -96,6 +96,26 @@ async def test_a_shade_the_hub_no_longer_reports_can_be_deleted(hass, hass_ws_cl
     assert hass.states.get("cover.kitchen") is not None
 
 
+async def test_a_shade_missing_from_the_list_but_with_entities_is_refused(hass, hass_ws_client, config_entry):
+    """A truncated first shadow after a restart can leave a live shade out of the hub's
+    list for a poll or two. Its device still has its cover and sensors, so it stays."""
+    hub = await _setup(hass, config_entry)
+    await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}}, names={"ABC": "Kitchen"})
+    dev_reg = dr.async_get(hass)
+    device = dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id)
+    assert er.async_get(hass).async_get("cover.kitchen").device_id == device.id
+
+    hub.api.rollers.pop("ABC")  # what a cut-off shadow looks like in memory
+    assert "ABC" not in hub.api.rollers
+
+    assert await async_remove_config_entry_device(hass, config_entry, device) is False
+    response = await _ws_remove(hass, hass_ws_client, device.id)
+    assert response["success"] is False
+    assert response["error"]["message"] == REJECTED
+    assert dev_reg.async_get(device.id) is not None
+    assert er.async_get(hass).async_get("cover.kitchen") is not None, "its entities are kept"
+
+
 async def test_refused_while_the_hub_is_not_loaded_or_has_not_reported(hass, config_entry):
     """No live list to check against: refuse, never raise."""
     hub = await _setup(hass, config_entry)
