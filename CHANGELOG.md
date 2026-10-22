@@ -5,7 +5,7 @@ This is Lukas Pleva's fork of
 It carries the October 2026 audit fixes upstream does not have; a Saturday job
 merges upstream into it and the delta is audited before it reaches `main`.
 
-## 1.5.0 (unreleased)
+## 1.5.0 (2026-10-21)
 
 ### Added
 
