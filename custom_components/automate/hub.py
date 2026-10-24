@@ -13,6 +13,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .const import (
     AUTOMATE_ENTITY_REMOVE,
     AUTOMATE_HUB_UPDATE,
+    CONF_AUTO_TITLE,
     CONF_POLL_INTERVAL,
     CONF_SIGNAL_POLL_INTERVAL,
     DEFAULT_POLL_INTERVAL,
@@ -44,8 +45,52 @@ class PulseHub:
 
     @property
     def title(self):
-        """Return the title of the hub shown in the integrations list."""
-        return f"{self.api.name} ({self.api.host})"
+        """The entry title this integration gives the hub: `<hub name> (<host>)`.
+
+        The same text as the hub device's name, so the integrations list and
+        the device page agree.
+        """
+        return f"{self.api.name or 'Pulse Hub'} ({self.api.host})"
+
+    def _title_is_ours(self) -> bool:
+        """True while the entry's title is one this integration wrote, not a person.
+
+        The last title the hub wrote is recorded in the entry's data (`auto_title`),
+        and the title is ours exactly while it still equals that record. An entry
+        with no record yet (created by the config flow, or set up by a release
+        before the record existed) is ours when its title is one the integration
+        itself produces: the config flow's bare hub name or `Pulse Hub (<host>)`,
+        or the `<hub name> (<host>)` form, including the `None (<host>)` an older
+        release wrote for a hub whose name had not arrived. Anything else was
+        typed by a person in Home Assistant and must never be overwritten.
+        """
+        current = self.config_entry.title
+        recorded = self.config_entry.data.get(CONF_AUTO_TITLE)
+        if recorded is not None:
+            return current == recorded
+        host = self.api.host
+        return current in {
+            self.title,
+            f"None ({host})",
+            self.api.name,
+            f"Pulse Hub ({host})",
+        }
+
+    def _async_update_title(self) -> None:
+        """Refresh the entry title from the hub's name and host, unless a person set it.
+
+        Writes the entry only when the title is still ours and has changed
+        (Home Assistant drops an update that changes nothing, so a steady title
+        costs no storage write and fires no update listener).
+        """
+        if not self._title_is_ours():
+            return
+        title = self.title
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            title=title,
+            data={**self.config_entry.data, CONF_AUTO_TITLE: title},
+        )
 
     @property
     def host(self):
@@ -183,8 +228,10 @@ class PulseHub:
             return
 
         dev_registry = device_registry.async_get(self.hass)
-        # Creates the hub device the first time, refreshes model / firmware / MAC
-        # on later updates (async_get_or_create updates an existing device).
+        # Creates the hub device the first time, refreshes name / model / firmware
+        # / MAC on later updates (async_get_or_create updates an existing device).
+        # It sets the device's `name` only; a name a person gave the device in
+        # Home Assistant lives in `name_by_user`, which this never touches.
         device = dev_registry.async_get_or_create(**self._hub_device_info())
         self.hub_device_id = device.id
         if not self._entered_into_device_registry:
@@ -192,7 +239,7 @@ class PulseHub:
             self._entered_into_device_registry = True
 
         await update_devices(self.hass, self.config_entry, self.api.rollers)
-        self.hass.config_entries.async_update_entry(self.config_entry, title=self.title)
+        self._async_update_title()
 
         async_dispatcher_send(
             self.hass, AUTOMATE_HUB_UPDATE.format(self.config_entry.entry_id)

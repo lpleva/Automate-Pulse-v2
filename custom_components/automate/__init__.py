@@ -47,8 +47,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload the entry so a changed polling interval takes effect.
 
-    HA fires this listener on ANY entry update, and the hub renames the entry's
-    title on every update, so reload only when the options actually changed.
+    HA fires this listener on ANY entry update, and the hub writes the entry
+    itself when its auto-generated title changes (title and the `auto_title`
+    record in data), so reload only when the options actually changed.
     """
     hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if hub is not None and dict(entry.options) == hub.options_at_setup:

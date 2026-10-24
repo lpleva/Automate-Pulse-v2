@@ -16,6 +16,11 @@ DEFAULT_SIGNAL_POLL_INTERVAL = 0  # off until the user opts in (Lukas, 2026-10-0
 MIN_SIGNAL_POLL_INTERVAL = 10  # the library's floor; 0 (off) is accepted separately
 MAX_SIGNAL_POLL_INTERVAL = 3600
 
+# Config entry `data` key: the last entry title this integration wrote itself
+# (`<hub name> (<host>)`). While the entry's title still equals it, the title is
+# ours to refresh; once it differs, a person renamed the entry and it stays.
+CONF_AUTO_TITLE = "auto_title"
+
 # Seconds the config flow waits for the hub's first reply before giving up.
 CONNECT_TEST_TIMEOUT = 20
 

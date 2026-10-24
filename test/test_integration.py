@@ -158,7 +158,9 @@ async def test_entities_and_devices(hass, config_entry):
     assert roller_device.model == "DC motor"
     assert roller_device.sw_version == "23"
 
-    assert config_entry.title == f"Living room hub ({HUB_HOST})"
+    # "Test hub" is not a title the integration writes, so it is a person's and
+    # stays; the auto-title rules are in test_entry_title.py.
+    assert config_entry.title == "Test hub"
 
 
 async def test_signal_sensor_stays_in_dbm_after_a_serial_reading(hass, config_entry):
