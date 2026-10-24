@@ -5,6 +5,47 @@ This is Lukas Pleva's fork of
 It carries the October 2026 audit fixes upstream does not have; a Saturday job
 merges upstream into it and the delta is audited before it reaches `main`.
 
+## Unreleased
+
+### Fixed
+
+- **A renamed hub entry stays renamed.** Every hub update wrote the entry's
+  title as `<hub name> (<host>)`, so a name given to the entry in Home Assistant
+  (Settings, Devices & services, the entry, Rename) was put back on the next
+  update, and a reload or restart undid it for sure. With three hubs all called
+  "My House" in the Pulse app, that left three entries told apart by address
+  alone. The integration now writes the title only while it is still its own:
+  the last title it wrote is recorded in the entry's data (`auto_title`), and
+  the title is refreshed only while it still equals that record. An entry with
+  no record yet counts as the integration's when its title is one the
+  integration itself produces (the config flow's bare hub name or
+  `Pulse Hub (<host>)`, or `<hub name> (<host>)`, `None (<host>)` included), so
+  an entry set up by an earlier release is taken over once and a fresh entry
+  still gets its `<hub name> (<host>)` title. A title that is still the
+  integration's follows the hub when its name changes or its address changes.
+  Anything else was typed by a person and is never touched. The title for a
+  hub whose name has not arrived is `Pulse Hub (<host>)`, the same text as the
+  hub's device name, instead of `None (<host>)`. A name given to the hub's
+  device (the device page, the pencil) was already safe: the registry keeps
+  `name_by_user` apart from the name the integration sets. The config flow's
+  own title is unchanged.
+
+### Testing
+
+- 104 tests (94 before): a fresh entry gets the auto title from each of the
+  four forms the integration produces, and the hub device's name matches it;
+  an unnamed hub is titled by host until its name arrives; a renamed entry
+  keeps its title across a hub update, an options-flow reload (the case seen
+  live on 2026-10-24) and a restart with the hub renamed meanwhile, with the
+  record left as the integration last wrote it; a title the integration never
+  wrote is left alone with no record made; an auto title follows the hub's
+  name, without reloading the entry, and follows the hub's address after a
+  move; the hub device's `name_by_user` survives updates and a restart while
+  the integration's own device name still follows the hub. Every push in that
+  file names the shade and checks the update reached the device registry, since
+  the library holds its callbacks while a shade is unnamed and a held update
+  would pass a "nothing changed" check for the wrong reason.
+
 ## 1.5.0 (2026-10-21)
 
 ### Added
