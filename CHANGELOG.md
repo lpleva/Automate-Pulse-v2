@@ -31,22 +31,24 @@ merges upstream into it and the delta is audited before it reaches `main`.
   own title is unchanged.
 - **A shade hub that moves to a new address is picked up without a restart.**
   Adding a hub that is already configured, at its new address, writes the new
-  host into the existing entry. Home Assistant used to reload the entry itself
-  at that point; from 2026.12 it no longer does for an integration that has an
-  update listener (this one has had one since the polling options, and HA logs
-  that deprecation today), so the entry would have kept talking to the old
-  address until a restart. The integration's own listener now reloads the
-  entry when the host changes, as HA asks, and the config flow no longer asks
-  HA to reload as well (on today's HA that was two reloads). A title or
-  `auto_title` write by the hub still does not reload it.
+  host into the existing entry. Home Assistant reloads the entry itself at
+  that point today, but has said it will stop doing so in 2026.12 for an
+  integration that has an update listener (this one has had one since the
+  polling options; HA logs that deprecation today), and then the entry would
+  keep talking to the old address until a restart. The integration's own
+  listener now reloads the entry when the host changes, as HA asks, and the
+  config flow no longer asks HA to reload as well (on today's HA, asking for
+  both would be two reloads). A title or `auto_title` write by the hub still
+  does not reload it, and a write that lands while the entry is unloading is
+  ignored instead of setting the entry up again.
 
 ### Testing
 
-- 108 tests (94 before): a running hub re-added at a new address is reloaded
+- 109 tests (94 before): a running hub re-added at a new address is reloaded
   once, by the integration (HA's deprecation is not logged), and the fresh hub
   talks to the new address; the listener reloads on an options change and on
   a host change, and not on a title or `auto_title` write, nor on the same
-  host written again. Then the title tests:
+  host written again, nor once the entry has unloaded. Then the title tests:
   a fresh entry gets the auto title from each of the
   four forms the integration produces, and the hub device's name matches it;
   an unnamed hub is titled by host until its name arrives; a renamed entry
