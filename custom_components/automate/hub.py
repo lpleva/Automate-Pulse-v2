@@ -40,7 +40,8 @@ class PulseHub:
         self._entered_into_device_registry = False
         self.hub_device_id: str | None = None
         # The options and host this hub was built with; the update listener
-        # reloads the entry only when one of them changes.
+        # reloads the entry only when one of them changes. The host is set
+        # again in async_setup, from the value the library hub is given.
         self.options_at_setup: dict = dict(config_entry.options)
         self.host_at_setup: str = config_entry.data["host"]
 
@@ -112,7 +113,10 @@ class PulseHub:
 
     async def async_setup(self):
         """Set up a hub based on host parameter."""
-        host = self.host
+        # Read once, here: the platforms were set up first and yielded to the
+        # loop, so a host written in that window must be the one both the
+        # library hub and the update listener's comparison use.
+        host = self.host_at_setup = self.host
 
         hub = aiopulse2.Hub(
             host,

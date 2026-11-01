@@ -11,6 +11,7 @@ from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
+from custom_components.automate import _async_entry_updated
 from custom_components.automate.const import (
     CONF_POLL_INTERVAL,
     CONF_SIGNAL_POLL_INTERVAL,
@@ -415,6 +416,19 @@ async def test_the_listener_ignores_a_title_or_auto_title_write(hass, config_ent
     reload.assert_not_called()
     assert hass.data[DOMAIN][config_entry.entry_id] is hub, "same hub, no reload"
     assert config_entry.title == f"Living room hub ({HUB_HOST})"
+
+
+async def test_the_listener_does_nothing_once_the_entry_has_unloaded(hass, config_entry):
+    """A listener task that runs late, after unload popped the hub, must not set the entry up again."""
+    await _setup(hass, config_entry)
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.NOT_LOADED
+
+    await _async_entry_updated(hass, config_entry)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.NOT_LOADED
+    assert config_entry.entry_id not in hass.data[DOMAIN]
 
 
 async def test_unload_stops_the_library(hass, config_entry):
