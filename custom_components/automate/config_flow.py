@@ -67,7 +67,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 if hub.id:
                     await self.async_set_unique_id(str(hub.id))
-                    self._abort_if_unique_id_configured(updates={"host": host})
+                    # A known hub at a new address: write the host and let the
+                    # entry's update listener reload it. Home Assistant 2026.12
+                    # stops reloading here for integrations with an update
+                    # listener ("should use it for scheduling a reload"), and
+                    # asking for both would reload the hub twice today.
+                    self._abort_if_unique_id_configured(
+                        updates={"host": host}, reload_on_update=False
+                    )
                 title = hub.name or f"Pulse Hub ({host})"
                 return self.async_create_entry(title=title, data={"host": host})
 

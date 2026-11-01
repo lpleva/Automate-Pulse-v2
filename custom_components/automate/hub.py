@@ -39,9 +39,10 @@ class PulseHub:
         self.cleanup_callbacks = []
         self._entered_into_device_registry = False
         self.hub_device_id: str | None = None
-        # The options this hub was built with; the update listener reloads the
-        # entry only when they change.
+        # The options and host this hub was built with; the update listener
+        # reloads the entry only when one of them changes.
         self.options_at_setup: dict = dict(config_entry.options)
+        self.host_at_setup: str = config_entry.data["host"]
 
     @property
     def title(self):

@@ -39,20 +39,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await hub.async_setup():
         return False
 
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 
     return True
 
 
-async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry so a changed polling interval takes effect.
+async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the entry when its options or its host changed.
+
+    Options: a changed polling interval only takes effect on a fresh hub.
+    Host: the config flow writes the new address when it finds an already
+    configured hub there (`_abort_if_unique_id_configured(updates=...)`), and
+    Home Assistant 2026.12 no longer reloads the entry itself for an
+    integration that has an update listener, so this listener does it.
 
     HA fires this listener on ANY entry update, and the hub writes the entry
     itself when its auto-generated title changes (title and the `auto_title`
-    record in data), so reload only when the options actually changed.
+    record in data), so anything else is left alone.
     """
     hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if hub is not None and dict(entry.options) == hub.options_at_setup:
+    if (
+        hub is not None
+        and dict(entry.options) == hub.options_at_setup
+        and entry.data["host"] == hub.host_at_setup
+    ):
         return
     await hass.config_entries.async_reload(entry.entry_id)
 
