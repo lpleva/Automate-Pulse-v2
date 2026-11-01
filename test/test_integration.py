@@ -82,6 +82,46 @@ async def test_flow_aborts_when_the_hub_is_already_configured(hass, fake_flow_hu
     assert config_entry.data["host"] == "192.0.2.11", "a moved hub updates the host"
 
 
+async def _fake_test(self, update_devices=False):
+    """Stand in for Hub.test on the real class: the hub answers with its id and name."""
+    self.id, self.name = HUB_ID, "Living room hub"
+    return True
+
+
+async def test_a_running_hub_found_at_a_new_address_is_reloaded_onto_it(hass, config_entry):
+    """The integration reloads the moved hub itself, once, not Home Assistant.
+
+    HA 2026.12 stops reloading the entry from `_abort_if_unique_id_configured`
+    for an integration with an update listener (it logs that deprecation
+    today), so the flow asks HA not to, and the listener does the reload.
+    (`fake_flow_hub` is not used here: its class would also stand in for the
+    library in the reload, since the flow and the hub share one module.)
+    """
+    hub = await _setup(hass, config_entry)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    with (
+        patch.object(devices.Hub, "test", _fake_test),
+        patch("homeassistant.config_entries.report_usage") as deprecation,
+        patch.object(
+            hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+        ) as reload,
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "192.0.2.11"}
+        )
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "already_configured"
+        await hass.async_block_till_done()
+
+    deprecation.assert_not_called()
+    assert reload.call_count == 1, "reloaded once, by the integration's own listener"
+    assert config_entry.state is ConfigEntryState.LOADED
+    new_hub = hass.data[DOMAIN][config_entry.entry_id]
+    assert new_hub is not hub, "the entry reloaded"
+    assert new_hub.api.host == "192.0.2.11", "the fresh hub talks to the new address"
+    assert hub.api is None, "the old hub was stopped"
+
+
 @pytest.mark.parametrize(
     ("exc", "error"),
     [
@@ -324,6 +364,57 @@ async def test_options_are_passed_to_the_library_and_reload(hass, config_entry):
     )
     await hass.async_block_till_done()
     assert hass.data[DOMAIN][config_entry.entry_id].api.signal_poll_interval == 0
+
+
+# --- the update listener ----------------------------------------------------------
+#
+# HA fires it on every entry write. Only two writes mean a new hub is needed: the
+# options (polling intervals) and the host. The hub's own title writes must not
+# reload, or every hub rename would restart the connection.
+
+
+async def test_the_listener_reloads_on_an_options_change(hass, config_entry):
+    hub = await _setup(hass, config_entry)
+    hass.config_entries.async_update_entry(config_entry, options={CONF_POLL_INTERVAL: 45})
+    await hass.async_block_till_done()
+    new_hub = hass.data[DOMAIN][config_entry.entry_id]
+    assert new_hub is not hub, "the entry reloaded"
+    assert new_hub.api.heartbeatinterval == 45
+
+
+async def test_the_listener_reloads_on_a_host_change(hass, config_entry):
+    """The write the config flow makes for a moved hub, with no flow around it."""
+    hub = await _setup(hass, config_entry)
+    hass.config_entries.async_update_entry(
+        config_entry, data={**config_entry.data, "host": "192.0.2.11"}
+    )
+    await hass.async_block_till_done()
+    new_hub = hass.data[DOMAIN][config_entry.entry_id]
+    assert new_hub is not hub, "the entry reloaded"
+    assert new_hub.api.host == "192.0.2.11"
+    assert new_hub.host_at_setup == "192.0.2.11", "a second write of the same host is quiet"
+
+
+async def test_the_listener_ignores_a_title_or_auto_title_write(hass, config_entry):
+    """What the hub writes about itself (1.5.1) must not reload it, or loop."""
+    hub = await _setup(hass, config_entry)
+    with patch.object(
+        hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+    ) as reload:
+        hass.config_entries.async_update_entry(
+            config_entry,
+            title=f"Living room hub ({HUB_HOST})",
+            data={**config_entry.data, "auto_title": f"Living room hub ({HUB_HOST})"},
+        )
+        await hass.async_block_till_done()
+        # the same host written again, as a re-run of the config flow would
+        hass.config_entries.async_update_entry(
+            config_entry, data={**config_entry.data, "host": HUB_HOST}
+        )
+        await hass.async_block_till_done()
+    reload.assert_not_called()
+    assert hass.data[DOMAIN][config_entry.entry_id] is hub, "same hub, no reload"
+    assert config_entry.title == f"Living room hub ({HUB_HOST})"
 
 
 async def test_unload_stops_the_library(hass, config_entry):
