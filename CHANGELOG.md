@@ -20,7 +20,7 @@ merges upstream into it and the delta is audited before it reaches `main`.
   "open", until the next good reading flipped it back. The timing points to
   the serial path: each bad value lasted exactly one sweep round, the time
   until the sweep queried that shade again (1.5 min on the 2-shade hub, 4.5 min
-  on the 8-shade hub), while the hub's shadow is polled every 10 s. A position
+  on the 8-shade hub), while the hub's shadow is polled every 30 s. A position
   outside 0..100 is now dropped by the library on both paths: the shade keeps
   its last good position and state, the reply's signal reading is still used,
   a dropped serial reading does not count as a fresh live reading, and one
