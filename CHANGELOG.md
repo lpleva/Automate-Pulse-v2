@@ -9,6 +9,58 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ### Fixed
 
+- **Two hubs can both hold a motor with the same id.** A motor id ("M4G") is
+  three characters the HUB assigns at pairing, so it is only unique per hub,
+  and the house now has two: the living room's right shade on one hub and the
+  spare bedroom's side shade on another are both "M4G" (found 2026-11-04 while
+  adding the sixth hub). Every per-shade unique id and device identifier was
+  the bare motor id, so Home Assistant would have dropped the second hub's
+  "M4G" entities as duplicates and merged its device into the first hub's; the
+  signal that removes a vanished shade's entities was keyed the same way and
+  would have removed both hubs' copies. Every id is now `<hub id>_<motor id>`
+  (the cover's unique id and the device identifier; the sensors and the button
+  add their suffix as before: `2023369_M4G_signal`), the hub id being the
+  entry's unique id as the config flow records it, or the entry id for an entry
+  that has none. The hub's own device keeps its bare hub id, which can never
+  equal a shade's id. The `refresh_signal` action, Delete on a stale device
+  and the per-device diagnostics read the new form.
+- **Existing installs are migrated in place; nothing visible changes.** The
+  config entry is now version 2, and on the first load the integration
+  rewrites the entity registry's unique ids and the shade devices' identifiers
+  to the new form. Entity ids, names, icons, areas, labels, a disabled entity,
+  history and dashboards all stay, because only those two registry fields
+  move; the hub's device is not touched. The migration is safe to run again
+  (an id that already carries the hub id is left alone), and an id whose new
+  form is already taken (a registry half migrated and then run under an older
+  release) is logged and skipped rather than failing the entry. **Rolling back
+  to 1.5.x after this release needs the pre-update backup:** Home Assistant
+  refuses to load a version-2 entry with the older code (by design, since the
+  older code would mint the bare ids again and create a second copy of every
+  shade).
+
+### Testing
+
+- 122 tests (109 before), in `test/test_hub_qualified_ids.py`: every entity's
+  unique id and the shade device's identifier carry the hub id and the hub's
+  own device keeps its bare id; a hub resolves only its own ids, and "M4" is
+  never mistaken for "M4G"; an entry without a hub id is scoped by its entry
+  id. Two hubs that both hold "M4G": both shades exist with their own entities,
+  devices and positions, the `refresh_signal` action queries each hub's own
+  M4G, the remove signal for one hub's M4G leaves the other's, and a stale
+  device is judged against its own hub. The migration: a version-1 install
+  with two shades and a stale device comes up with every entity id, device,
+  area, user-given name, icon and disabled sensor kept and no "_2" copies; it
+  runs once and twice without double-prefixing; a version-2 install is not
+  written to; an entry without a hub id; a target id already taken is skipped
+  with a warning; an entry from a newer release is refused.
+
+## 1.5.2 (2026-11-01) and 1.5.1 (2026-10-24)
+
+Two patch releases: the renamed-entry fix shipped in 1.5.1, the moved-hub fix
+in 1.5.2.
+
+### Fixed
+
 - **A renamed hub entry stays renamed.** Every hub update wrote the entry's
   title as `<hub name> (<host>)`, so a name given to the entry in Home Assistant
   (Settings, Devices & services, the entry, Rename) was put back on the next
