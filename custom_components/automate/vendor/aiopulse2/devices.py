@@ -120,6 +120,10 @@ def valid_percent(value) -> Optional[int]:
     "open" state. A reading outside the range is not a position at all, so the
     caller keeps the last good value instead of storing or clamping it.
     """
+    if isinstance(value, bool):
+        return None  # True is not 1 percent
+    if isinstance(value, float) and not value.is_integer():
+        return None  # 50.5 is not a position the hub can mean
     try:
         percent = int(value)
     except (TypeError, ValueError):
@@ -370,6 +374,7 @@ class Hub:
                 roller.name,
                 roller.closed_percent,
             )
+            roller.note_rejected_position(closedpercent, "serial")
         else:
             newvals["closed_percent"] = closed
         tilt = valid_percent(tiltpercent)
@@ -818,6 +823,7 @@ class Hub:
                     current.name,
                     current.closed_percent,
                 )
+                current.note_rejected_position(roller["mp"], "shadow")
             else:
                 newvals["closed_percent"] = closed
         if "vo" not in roller:
@@ -1108,6 +1114,12 @@ class Roller:
         self.signal_checks = 0
         self.signal_misses = 0
         self.signal_missed = False
+        # Position readings dropped by valid_percent (outside 0..100), so a
+        # production install can show they happen without debug logging: how
+        # many since the Hub was built, and the most recent one's raw value, the
+        # path it came by ("serial" or "shadow") and time.monotonic() when.
+        self.rejected_positions = 0
+        self.last_rejected_position: Optional[Dict[str, Any]] = None
         self.signal_stale = False
         # This roller's entry in the last parsed shadow, exactly as the hub sent
         # it (a shallow copy), and the time.monotonic() it arrived; None until
@@ -1223,6 +1235,11 @@ class Roller:
             return
         for callback in self.update_callbacks:
             self.hub.async_add_job(callback, self)
+
+    def note_rejected_position(self, raw, path: str) -> None:
+        """Record a position reading valid_percent threw away (no callback: nothing changed)."""
+        self.rejected_positions += 1
+        self.last_rejected_position = {"raw": raw, "path": path, "at": time.monotonic()}
 
     def set_signal(self, signal) -> bool:
         """Set the signal, in dBm, from a serial ",R<hex>" register value.

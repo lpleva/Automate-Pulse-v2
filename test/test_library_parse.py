@@ -156,14 +156,49 @@ async def test_serial_position_response_notifies_on_change(hub):
 # and "open" until the next reading. Those values are not positions.
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("000", 0), ("050", 50), ("100", 100), (0, 0), (100, 100), ("7", 7)])
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("000", 0), ("050", 50), ("100", 100), (0, 0), (100, 100), ("7", 7), (50.0, 50)]
+)
 def test_valid_percent_accepts_the_whole_range(raw, expected):
     assert devices.valid_percent(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["101", "125", "155", "200", "999", -1, 101, "abc", None, "", 1.5e3])
+@pytest.mark.parametrize(
+    "raw", ["101", "125", "155", "200", "999", -1, 101, "abc", None, "", 1.5e3, True, False, 50.5, "50.5"]
+)
 def test_valid_percent_rejects_anything_else(raw):
     assert devices.valid_percent(raw) is None
+
+
+async def test_rejected_positions_are_counted_on_the_roller(hub):
+    """Debug logging is off in production; the count and the last one go to diagnostics."""
+    # rs -92 is what R54 converts to, so the signal never changes in this test and
+    # the only thing that could notify is the rejection itself.
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -92, "ol": True, "mp": 100}}))
+    roller = hub.rollers["ABC"]
+    hub.response_parse("!ABCr100b000,R54;")  # settles tilt (None -> 0) before we listen
+    await asyncio.sleep(0)
+    assert roller.rejected_positions == 0 and roller.last_rejected_position is None
+    seen = []
+    roller.callback_subscribe(lambda r: seen.append(r.closed_percent))
+
+    hub.response_parse("!ABCr125b000,R54;")
+    assert roller.rejected_positions == 1
+    assert roller.last_rejected_position["raw"] == "125"
+    assert roller.last_rejected_position["path"] == "serial"
+    assert time.monotonic() - roller.last_rejected_position["at"] < 5
+
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -92, "ol": True, "mp": 200}}))
+    assert roller.rejected_positions == 2
+    assert roller.last_rejected_position["raw"] == 200
+    assert roller.last_rejected_position["path"] == "shadow"
+
+    hub.response_parse("!ABCr100b000,R54;")  # a good reading leaves the record alone
+    await asyncio.sleep(0)
+    assert roller.rejected_positions == 2
+    assert roller.last_rejected_position["path"] == "shadow"
+    assert roller.closed_percent == 100
+    assert seen == [], "a rejection changes nothing, so nobody is notified for it"
 
 
 @pytest.mark.parametrize("raw", ["125", "155", "200", "101"])
