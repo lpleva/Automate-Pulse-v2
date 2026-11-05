@@ -216,7 +216,7 @@ def _hub_section(hub: PulseHub, now: float) -> dict[str, Any]:
 
 
 def _shade_section(
-    roller: aiopulse2.Roller, ent_reg: er.EntityRegistry, now: float
+    roller: aiopulse2.Roller, shade_id: str, ent_reg: er.EntityRegistry, now: float
 ) -> dict[str, Any]:
     """One shade: identity, entities, position, signal, battery, motor, and its shadow entry."""
     hub = roller.hub
@@ -227,7 +227,7 @@ def _shade_section(
         "name": roller.name,
         "name_is_placeholder": roller.name_is_placeholder,
         "entities": {
-            label: ent_reg.async_get_entity_id(domain, DOMAIN, f"{roller.id}{suffix}")
+            label: ent_reg.async_get_entity_id(domain, DOMAIN, f"{shade_id}{suffix}")
             for label, domain, suffix in _SHADE_ENTITIES
         },
         "online": roller.online,
@@ -281,7 +281,7 @@ def _diagnostics(
     ent_reg = er.async_get(hass)
     data["hub"] = _hub_section(hub, now)
     data["shades"] = {
-        roller_id: _shade_section(roller, ent_reg, now)
+        roller_id: _shade_section(roller, hub.shade_identifier(roller_id), ent_reg, now)
         for roller_id, roller in hub.api.rollers.items()
         if roller_ids is None or roller_id in roller_ids
     }
@@ -311,4 +311,7 @@ async def async_get_device_diagnostics(
         data = _diagnostics(hass, entry, roller_ids=[])
         data["shade_ids"] = sorted(hub.api.rollers)
         return data
-    return _diagnostics(hass, entry, roller_ids=[ident])
+    # A shade's identifier is `<hub id>_<motor id>`; one the hub does not know
+    # (a stale device) gives an empty "shades" section, not an error.
+    roller_id = hub.roller_id_for_identifier(ident)
+    return _diagnostics(hass, entry, roller_ids=[roller_id] if roller_id else [])

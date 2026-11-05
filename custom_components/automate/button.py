@@ -44,11 +44,7 @@ class AutomateRefreshSignal(AutomateBase, ButtonEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:wifi-refresh"
     _attr_name = "Refresh signal"
-
-    @property
-    def unique_id(self):
-        """Return a unique identifier for this button."""
-        return f"{self.roller.id}_refresh_signal"
+    _unique_id_suffix = "_refresh_signal"
 
     async def async_press(self) -> None:
         """Query the shade; a clear error when the hub, shade or port cannot be reached."""

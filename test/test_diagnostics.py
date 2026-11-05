@@ -18,7 +18,7 @@ from pytest_homeassistant_custom_component.components.diagnostics import (
 from custom_components.automate.const import DOMAIN
 from custom_components.automate.vendor.aiopulse2 import devices
 
-from .conftest import HUB_HOST, HUB_ID, HUB_MAC, feed, settle
+from .conftest import HUB_HOST, HUB_ID, HUB_MAC, feed, settle, shade_id
 from .test_integration import _setup, _sweep_entry
 
 pytestmark = pytest.mark.usefixtures("no_network")
@@ -237,7 +237,7 @@ async def test_diagnostics_make_no_network_calls(hass, hass_client, config_entry
     ):
         await get_diagnostics_for_config_entry(hass, hass_client, config_entry)
         dev_reg = dr.async_get(hass)
-        for ident in (HUB_ID, "ABC"):
+        for ident in (HUB_ID, shade_id("ABC")):
             device = dev_reg.async_get_device_by_identifier((DOMAIN, ident), config_entry.entry_id)
             await get_diagnostics_for_device(hass, hass_client, config_entry, device)
     for mock in (serial, sendws, send_payload, open_connection, ws_connect):

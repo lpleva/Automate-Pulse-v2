@@ -9,7 +9,7 @@ from homeassistant.setup import async_setup_component
 from custom_components.automate import async_remove_config_entry_device
 from custom_components.automate.const import DOMAIN
 
-from .conftest import HUB_HOST, HUB_ID, feed
+from .conftest import HUB_HOST, HUB_ID, feed, shade_id
 
 pytestmark = pytest.mark.usefixtures("no_network")
 
@@ -29,7 +29,7 @@ def _stale_device(hass, config_entry, roller_id, name):
     lists the motor again, so no entity is ever created for it and nothing removes it."""
     return dr.async_get(hass).async_get_or_create(
         config_entry_id=config_entry.entry_id,
-        identifiers={(DOMAIN, roller_id)},
+        identifiers={(DOMAIN, shade_id(roller_id, hub_id=config_entry.unique_id))},
         manufacturer="Rollease Acmeda",
         name=name,
     )
@@ -52,7 +52,7 @@ async def test_a_live_shade_cannot_be_deleted(hass, hass_ws_client, config_entry
     hub = await _setup(hass, config_entry)
     await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}}, names={"ABC": "Kitchen"})
     dev_reg = dr.async_get(hass)
-    device = dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id)
+    device = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("ABC")), config_entry.entry_id)
 
     assert await async_remove_config_entry_device(hass, config_entry, device) is False
     response = await _ws_remove(hass, hass_ws_client, device.id)
@@ -86,13 +86,13 @@ async def test_a_shade_the_hub_no_longer_reports_can_be_deleted(hass, hass_ws_cl
     response = await _ws_remove(hass, hass_ws_client, stale.id)
     assert response["success"] is True, response
     assert dev_reg.async_get(stale.id) is None
-    assert dev_reg.async_get_device_by_identifier((DOMAIN, "V81"), config_entry.entry_id) is None
+    assert dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("V81")), config_entry.entry_id) is None
 
     # The live shade and the hub are untouched, and the next update does not bring it back.
-    assert dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id) is not None
+    assert dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("ABC")), config_entry.entry_id) is not None
     assert dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id) is not None
     await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}})
-    assert dev_reg.async_get_device_by_identifier((DOMAIN, "V81"), config_entry.entry_id) is None
+    assert dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("V81")), config_entry.entry_id) is None
     assert hass.states.get("cover.kitchen") is not None
 
 
@@ -102,7 +102,7 @@ async def test_a_shade_missing_from_the_list_but_with_entities_is_refused(hass, 
     hub = await _setup(hass, config_entry)
     await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 30}}, names={"ABC": "Kitchen"})
     dev_reg = dr.async_get(hass)
-    device = dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id)
+    device = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("ABC")), config_entry.entry_id)
     assert er.async_get(hass).async_get("cover.kitchen").device_id == device.id
 
     hub.api.rollers.pop("ABC")  # what a cut-off shadow looks like in memory
@@ -161,6 +161,7 @@ async def test_the_check_is_per_hub(hass, hass_ws_client, config_entry):
         title="Other hub",
         data={"host": OTHER_HUB_HOST},
         unique_id=OTHER_HUB_ID,
+        version=2,
     )
     other_entry.add_to_hass(hass)
     other_hub = await _setup(hass, other_entry)
@@ -179,7 +180,7 @@ async def test_the_check_is_per_hub(hass, hass_ws_client, config_entry):
     stale_side = _stale_device(hass, config_entry, "GS1", "Guest - side")
 
     dev_reg = dr.async_get(hass)
-    live_main = dev_reg.async_get_device_by_identifier((DOMAIN, "GM1"), other_entry.entry_id)
+    live_main = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("GM1", hub_id=OTHER_HUB_ID)), other_entry.entry_id)
     assert live_main is not None and live_main.id != stale_main.id, "one device per entry"
     assert dev_reg.async_get_device_by_identifier((DOMAIN, OTHER_HUB_ID), other_entry.entry_id)
 
@@ -188,7 +189,7 @@ async def test_the_check_is_per_hub(hass, hass_ws_client, config_entry):
     assert await async_remove_config_entry_device(hass, config_entry, stale_side) is True
     # The live ones on the other entry cannot, and this hub's live shade cannot either.
     assert await async_remove_config_entry_device(hass, other_entry, live_main) is False
-    kitchen = dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id)
+    kitchen = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("ABC")), config_entry.entry_id)
     assert await async_remove_config_entry_device(hass, config_entry, kitchen) is False
 
     response = await _ws_remove(hass, hass_ws_client, stale_main.id)

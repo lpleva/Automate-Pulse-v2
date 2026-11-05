@@ -30,7 +30,13 @@ DATA_SCHEMA = vol.Schema({vol.Required("host"): str})
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Automate Pulse Hub v2."""
 
-    VERSION = 1
+    # 2 (fork 1.6.0): per-shade unique ids and device identifiers are
+    # `<hub id>_<motor id>`, not the bare motor id; `async_migrate_entry` in
+    # __init__.py rewrites the registries. An earlier release refuses a
+    # version-2 entry outright (Home Assistant will not downgrade), which is
+    # the wanted outcome: it would otherwise mint the bare ids again and
+    # create a second copy of every shade.
+    VERSION = 2
 
     @staticmethod
     @callback

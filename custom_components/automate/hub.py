@@ -20,7 +20,7 @@ from .const import (
     DEFAULT_SIGNAL_POLL_INTERVAL,
     DOMAIN,
 )
-from .helpers import update_devices
+from .helpers import entry_scope, shade_identifier, update_devices
 from .vendor import aiopulse2
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,6 +100,32 @@ class PulseHub:
         return self.config_entry.data["host"]
 
     @property
+    def scope(self) -> str:
+        """The prefix on every id of this hub's shades (the hub id); see helpers.entry_scope."""
+        return entry_scope(self.config_entry)
+
+    def shade_identifier(self, roller_id: str) -> str:
+        """The device identifier (and cover unique id) of one of this hub's shades."""
+        return shade_identifier(self.scope, roller_id)
+
+    def roller_id_for_identifier(self, identifier: str) -> str | None:
+        """The motor id behind one of this hub's shade identifiers or entity unique ids.
+
+        `<scope>_<motor id>` and `<scope>_<motor id>_<suffix>` both give the motor
+        id. None for an id that is not under this hub's scope: a hub's own device
+        identifier, or a shade of another hub. The motor id is matched against
+        what the hub reports, so a suffix can never be mistaken for part of it.
+        """
+        prefix = f"{self.scope}_"
+        if self.api is None or not identifier.startswith(prefix):
+            return None
+        rest = identifier[len(prefix) :]
+        for roller_id in self.api.rollers:
+            if rest == roller_id or rest.startswith(f"{roller_id}_"):
+                return roller_id
+        return None
+
+    @property
     def poll_interval(self) -> float:
         """Seconds between shadow polls, from the entry options."""
         return self.config_entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
@@ -163,16 +189,14 @@ class PulseHub:
     def roller_for_unique_id(self, unique_id: str) -> aiopulse2.Roller | None:
         """The roller behind one of this hub's entity unique ids, or None.
 
-        Every entity of a shade is keyed on the roller id: the cover is the id
-        itself, the sensors and the button add a suffix (`<id>_signal`,
-        `<id>_refresh_signal`, ...).
+        Every entity of a shade is keyed on `<hub id>_<motor id>`: the cover is
+        that itself, the sensors and the button add a suffix (`..._signal`,
+        `..._refresh_signal`, ...).
         """
-        if self.api is None:
+        roller_id = self.roller_id_for_identifier(unique_id)
+        if roller_id is None:
             return None
-        for roller_id, roller in self.api.rollers.items():
-            if unique_id == roller_id or unique_id.startswith(f"{roller_id}_"):
-                return roller
-        return None
+        return self.api.rollers[roller_id]
 
     async def async_refresh_signal(self, roller: aiopulse2.Roller) -> bool:
         """Ask one shade for a live signal reading now; True when it answered.
@@ -250,10 +274,13 @@ class PulseHub:
             self.hass, AUTOMATE_HUB_UPDATE.format(self.config_entry.entry_id)
         )
 
-        for unique_id in list(self.current_rollers):
-            if unique_id not in self.api.rollers:
-                _LOGGER.debug("Notifying remove of %s", unique_id)
-                self.current_rollers.pop(unique_id)
+        for roller_id in list(self.current_rollers):
+            if roller_id not in self.api.rollers:
+                _LOGGER.debug("Notifying remove of %s", roller_id)
+                self.current_rollers.pop(roller_id)
+                # Scoped to this hub: the signal is process-wide, and another
+                # hub may hold a motor with the same id.
                 async_dispatcher_send(
-                    self.hass, AUTOMATE_ENTITY_REMOVE.format(unique_id)
+                    self.hass,
+                    AUTOMATE_ENTITY_REMOVE.format(self.shade_identifier(roller_id)),
                 )

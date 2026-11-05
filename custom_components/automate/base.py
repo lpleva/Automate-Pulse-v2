@@ -9,6 +9,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_registry import async_get as get_ent_reg
 
 from .const import AUTOMATE_ENTITY_REMOVE, DOMAIN
+from .helpers import entry_scope, shade_identifier
 from .vendor import aiopulse2
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,10 +24,17 @@ class AutomateBase(entity.Entity):
     # own suffix ("Battery", "Signal") and HA prefixes the device name.
     _attr_name = None
 
-    def __init__(self, roller: aiopulse2.Roller, config_entry_id: str):
+    # What a subclass appends to the shade's id to make its own unique id: the
+    # cover is the shade's id itself, the sensors and the button add a suffix.
+    _unique_id_suffix = ""
+
+    def __init__(self, roller: aiopulse2.Roller, config_entry):
         """Initialize the roller."""
         self.roller = roller
-        self.config_entry_id = config_entry_id
+        self.config_entry_id = config_entry.entry_id
+        # Motor ids are only unique per hub, so every id this entity mints is
+        # qualified by the entry's scope (the hub id); see helpers.entry_scope.
+        self.shade_id = shade_identifier(entry_scope(config_entry), roller.id)
 
     @property
     def available(self) -> bool:
@@ -51,7 +59,7 @@ class AutomateBase(entity.Entity):
 
         dev_registry = get_dev_reg(self.hass)
         device = dev_registry.async_get_device_by_identifier(
-            (DOMAIN, self.roller.id), self.config_entry_id
+            (DOMAIN, self.shade_id), self.config_entry_id
         )
         if device is not None:
             dev_registry.async_update_device(
@@ -67,7 +75,7 @@ class AutomateBase(entity.Entity):
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                AUTOMATE_ENTITY_REMOVE.format(self.roller.id),
+                AUTOMATE_ENTITY_REMOVE.format(self.shade_id),
                 self.async_remove_and_unregister,
             )
         )
@@ -90,14 +98,14 @@ class AutomateBase(entity.Entity):
 
     @property
     def unique_id(self):
-        """Return the unique ID of this roller."""
-        return self.roller.id
+        """Return the unique ID of this entity: `<hub id>_<motor id>` plus the subclass suffix."""
+        return f"{self.shade_id}{self._unique_id_suffix}"
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return the device info, linking the roller to its hub."""
         info = DeviceInfo(
-            identifiers={(DOMAIN, self.roller.id)},
+            identifiers={(DOMAIN, self.shade_id)},
             name=self.roller.name,
             manufacturer="Rollease Acmeda",
             model=self.roller.devicetype,

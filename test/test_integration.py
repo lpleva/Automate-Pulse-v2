@@ -19,7 +19,7 @@ from custom_components.automate.const import (
 )
 from custom_components.automate.vendor.aiopulse2 import devices, errors
 
-from .conftest import HUB_HOST, HUB_ID, feed, settle
+from .conftest import HUB_HOST, HUB_ID, feed, settle, shade_id
 from .test_library_serial import FakeSerialHub
 
 pytestmark = pytest.mark.usefixtures("no_network")
@@ -183,17 +183,17 @@ async def test_entities_and_devices(hass, config_entry):
     assert cover.attributes["current_position"] == 70
 
     ent_reg = er.async_get(hass)
-    assert ent_reg.async_get("sensor.kitchen_signal").unique_id == "ABC_signal"
+    assert ent_reg.async_get("sensor.kitchen_signal").unique_id == shade_id("ABC", suffix="_signal")
     assert ent_reg.async_get("sensor.kitchen_signal").disabled is False
-    assert ent_reg.async_get("sensor.kitchen_battery").unique_id == "ABC_battery"
-    assert ent_reg.async_get("cover.kitchen").unique_id == "ABC"
+    assert ent_reg.async_get("sensor.kitchen_battery").unique_id == shade_id("ABC", suffix="_battery")
+    assert ent_reg.async_get("cover.kitchen").unique_id == shade_id("ABC")
 
     dev_reg = dr.async_get(hass)
     hub_device = dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id)
     assert hub_device.model == "Pulse Pro Hub"
     assert hub_device.sw_version == "1.3.0"
     assert (dr.CONNECTION_NETWORK_MAC, "aa:bb:cc:dd:ee:ff") in hub_device.connections
-    roller_device = dev_reg.async_get_device_by_identifier((DOMAIN, "ABC"), config_entry.entry_id)
+    roller_device = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("ABC")), config_entry.entry_id)
     assert roller_device.name == "Kitchen"
     assert roller_device.via_device_id == hub_device.id
     assert roller_device.model == "DC motor"
@@ -223,6 +223,7 @@ def _sweep_entry(hass):
         data={"host": HUB_HOST},
         unique_id=HUB_ID,
         options={CONF_SIGNAL_POLL_INTERVAL: 30},
+        version=2,
     )
     entry.add_to_hass(hass)
     return entry
@@ -243,7 +244,7 @@ async def test_live_sweep_option_keeps_the_serial_reading(hass):
     assert misses.attributes["friendly_name"] == "Kitchen Missed signal checks"
     assert "unit_of_measurement" not in misses.attributes
     ent_reg = er.async_get(hass)
-    assert ent_reg.async_get("sensor.kitchen_missed_signal_checks").unique_id == "ABC_signal_misses"
+    assert ent_reg.async_get("sensor.kitchen_missed_signal_checks").unique_id == shade_id("ABC", suffix="_signal_misses")
     assert ent_reg.async_get("sensor.kitchen_missed_signal_checks").entity_category is er.EntityCategory.DIAGNOSTIC
 
     hub.api.response_parse("!ABCr050b000,R54;")
@@ -475,7 +476,7 @@ async def test_refresh_signal_button_per_shade(hass, config_entry):
         assert state is not None, hass.states.async_entity_ids()
         assert state.attributes["friendly_name"].endswith("Refresh signal")
         entry = ent_reg.async_get(entity_id)
-        assert entry.unique_id == f"{roller_id}_refresh_signal"
+        assert entry.unique_id == shade_id(roller_id, suffix="_refresh_signal")
         assert entry.entity_category is er.EntityCategory.DIAGNOSTIC
         assert entry.device_id == ent_reg.async_get(cover).device_id, "same device as the shade"
     assert hass.services.has_service(DOMAIN, "refresh_signal")

@@ -23,6 +23,11 @@ HUB_ID = "2001234"
 HUB_MAC = "AA:BB:CC:DD:EE:FF"
 
 
+def shade_id(roller_id, hub_id=HUB_ID, suffix=""):
+    """A shade's device identifier / entity unique id: `<hub id>_<motor id>` plus a suffix."""
+    return f"{hub_id}_{roller_id}{suffix}"
+
+
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Enable loading custom integrations in all tests."""
@@ -63,6 +68,7 @@ def config_entry(hass):
         title="Test hub",
         data={"host": HUB_HOST},
         unique_id=HUB_ID,
+        version=2,
     )
     entry.add_to_hass(hass)
     return entry

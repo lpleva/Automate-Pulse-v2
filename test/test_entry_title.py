@@ -26,7 +26,7 @@ RENAMED = f"Shades hub - first floor living area ({HUB_HOST})"
 
 def _entry(hass, title, host=HUB_HOST, **data):
     entry = MockConfigEntry(
-        domain=DOMAIN, title=title, data={"host": host, **data}, unique_id=HUB_ID
+        domain=DOMAIN, title=title, data={"host": host, **data}, unique_id=HUB_ID, version=2
     )
     entry.add_to_hass(hass)
     return entry

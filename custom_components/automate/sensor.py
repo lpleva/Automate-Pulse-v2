@@ -56,16 +56,12 @@ class AutomateBattery(AutomateBase, SensorEntity):
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Battery"
+    _unique_id_suffix = "_battery"
 
     @property
     def native_value(self):
         """Return the battery percentage."""
         return self.roller.battery_percent
-
-    @property
-    def unique_id(self):
-        """Return a unique identifier for this device."""
-        return f"{self.roller.id}_battery"
 
     @property
     def extra_state_attributes(self):
@@ -92,16 +88,12 @@ class AutomateSignal(AutomateBase, SensorEntity):
     _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Signal"
+    _unique_id_suffix = "_signal"
 
     @property
     def native_value(self):
         """Return the signal strength in dBm, or None when there is no current reading."""
         return self.roller.signal_reading
-
-    @property
-    def unique_id(self):
-        """Return a unique identifier for this device."""
-        return f"{self.roller.id}_signal"
 
 
 class AutomateSignalMisses(AutomateBase, SensorEntity):
@@ -117,16 +109,12 @@ class AutomateSignalMisses(AutomateBase, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Missed signal checks"
+    _unique_id_suffix = "_signal_misses"
 
     @property
     def native_value(self):
         """Return the number of checks that got no reply."""
         return self.roller.signal_misses
-
-    @property
-    def unique_id(self):
-        """Return a unique identifier for this device."""
-        return f"{self.roller.id}_signal_misses"
 
     @property
     def extra_state_attributes(self):

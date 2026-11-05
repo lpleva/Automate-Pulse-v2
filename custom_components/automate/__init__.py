@@ -5,11 +5,13 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
+from .helpers import entry_scope, shade_identifier
 from .hub import PulseHub
 from .services import async_setup_services
 
@@ -24,6 +26,102 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the integration's actions; they exist whether or not a hub is set up."""
     async_setup_services(hass)
     return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Bring an entry's registries up to the current id scheme.
+
+    Version 1 -> 2 (fork 1.6.0): every per-shade unique id and device
+    identifier was the bare motor id ("M4G"), which the hub assigns at pairing
+    and which is therefore only unique per hub. Two hubs holding the same motor
+    id made Home Assistant drop the second hub's entities as duplicates. The
+    ids are now `<scope>_<motor id>` (helpers.entry_scope: the hub id, or the
+    entry id for an entry without one), and this rewrites the registries in
+    place so nothing visible changes: entity ids, names, areas, labels,
+    history and dashboards all stay, because only the registries' unique_id
+    and identifiers fields move.
+
+    The hub's own device keeps its identifier (the bare hub id): it is the one
+    whose identifier is the entry's unique id, or, for an entry without one,
+    the only device that does not hang off another (`via_device_id`), since
+    every shade device is created under the hub's.
+
+    Safe to run again: an id that already carries the scope is left alone, and
+    a target id that is already taken (a registry half migrated, then an older
+    release run on it) is logged and skipped rather than failing the entry.
+    """
+    if entry.version > 2:
+        return False
+    if entry.version == 1:
+        _migrate_ids_to_hub_scope(hass, entry)
+        hass.config_entries.async_update_entry(entry, version=2)
+        _LOGGER.info("Migrated entry %s to version 2 (hub-qualified shade ids)", entry.title)
+    return True
+
+
+def _migrate_ids_to_hub_scope(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Prefix this entry's shade entity unique ids and device identifiers with its scope."""
+    scope = entry_scope(entry)
+    prefix = f"{scope}_"
+    ent_reg = er.async_get(hass)
+
+    def migrate_entity(reg_entry: er.RegistryEntry) -> dict | None:
+        if reg_entry.unique_id.startswith(prefix):
+            return None
+        new_unique_id = f"{prefix}{reg_entry.unique_id}"
+        taken = ent_reg.async_get_entity_id(reg_entry.domain, DOMAIN, new_unique_id)
+        if taken is not None:
+            _LOGGER.warning(
+                "Not migrating %s: its new unique id %s is already held by %s; "
+                "the old entry is left as it is and can be deleted",
+                reg_entry.entity_id,
+                new_unique_id,
+                taken,
+            )
+            return None
+        return {"new_unique_id": new_unique_id}
+
+    er.async_migrate_entries(hass, entry.entry_id, migrate_entity)
+
+    dev_reg = dr.async_get(hass)
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if _is_hub_device(device, entry):
+            continue
+        new_identifiers = set()
+        for domain, ident in device.identifiers:
+            if domain == DOMAIN and not ident.startswith(prefix):
+                ident = shade_identifier(scope, ident)
+            new_identifiers.add((domain, ident))
+        if new_identifiers == device.identifiers:
+            continue
+        taken = next(
+            (
+                other
+                for domain, ident in new_identifiers
+                if domain == DOMAIN
+                and (other := dev_reg.async_get_device_by_identifier((domain, ident), entry.entry_id))
+                is not None
+                and other.id != device.id
+            ),
+            None,
+        )
+        if taken is not None:
+            _LOGGER.warning(
+                "Not migrating device %s (%s): its new identifier is already held by "
+                "device %s; the old device is left as it is and can be deleted",
+                device.id,
+                device.name_by_user or device.name,
+                taken.id,
+            )
+            continue
+        dev_reg.async_update_device(device.id, new_identifiers=new_identifiers)
+
+
+def _is_hub_device(device: DeviceEntry, entry: ConfigEntry) -> bool:
+    """Whether a device of this entry is the hub's own, which keeps its bare identifier."""
+    if entry.unique_id is not None:
+        return (DOMAIN, entry.unique_id) in device.identifiers
+    return device.via_device_id is None
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -102,9 +200,11 @@ async def async_remove_config_entry_device(
     since then there is no live list to check against.
 
     Every device of this integration carries one `(DOMAIN, <id>)` identifier,
-    the hub's `str(hub.id)` or the shade's roller id. Devices belong to one
-    config entry each, so an id that is live on ANOTHER hub's entry does not
-    keep this entry's device; only this entry's hub is consulted.
+    the hub's `str(hub.id)` or the shade's `<hub id>_<motor id>`. Devices belong
+    to one config entry each, so an id that is live on ANOTHER hub's entry does
+    not keep this entry's device; only this entry's hub is consulted. A shade
+    device still carrying a bare motor id (one the migration could not place)
+    is never live, so it can go.
     """
     hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if hub is None or hub.api is None or not hub.api.id:
@@ -128,7 +228,7 @@ async def async_remove_config_entry_device(
     if str(hub.api.id) in ours:
         _LOGGER.debug("Refusing to remove device %s: it is the hub itself", device.id)
         return False
-    live = ours & set(hub.api.rollers)
+    live = ours & {hub.shade_identifier(roller_id) for roller_id in hub.api.rollers}
     if live:
         _LOGGER.debug(
             "Refusing to remove device %s: shade %s is still reported by the hub",
