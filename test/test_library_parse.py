@@ -150,6 +150,73 @@ async def test_serial_position_response_notifies_on_change(hub):
     assert seen == [-92]
 
 
+# --- impossible positions ---------------------------------------------------------
+# A hub reported 125, 155 and 200 over serial for shades that were closed (100)
+# and never moved (2026-11-03, 2026-11-05); the cover showed position -25/-55/-100
+# and "open" until the next reading. Those values are not positions.
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("000", 0), ("050", 50), ("100", 100), (0, 0), (100, 100), ("7", 7)])
+def test_valid_percent_accepts_the_whole_range(raw, expected):
+    assert devices.valid_percent(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["101", "125", "155", "200", "999", -1, 101, "abc", None, "", 1.5e3])
+def test_valid_percent_rejects_anything_else(raw):
+    assert devices.valid_percent(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["125", "155", "200", "101"])
+async def test_impossible_serial_position_keeps_the_last_good_one(hub, caplog, raw):
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 100}}))
+    roller = hub.rollers["ABC"]
+    assert roller.closed_percent == 100
+    with caplog.at_level(logging.DEBUG, logger=devices.__name__):
+        hub.response_parse(f"!ABCr{raw}b000,R54;")
+    assert roller.closed_percent == 100, "the impossible reading must not replace the real one"
+    assert roller.serial_position_at is None, "a dropped reading is not a live position reading"
+    assert roller.signal == -92, "the reply's signal is a separate field and still counts"
+    assert roller.serial_signal_at is not None
+    line = [r for r in caplog.records if "impossible serial position" in r.getMessage()]
+    assert len(line) == 1 and line[0].levelno == logging.DEBUG
+    assert f"'{raw}'" in line[0].getMessage() and "ABC" in line[0].getMessage()
+
+
+async def test_impossible_serial_position_does_not_refresh_a_live_reading(hub):
+    """Sweep on: a dropped reading must not extend the earlier good reading's lease."""
+    hub.signal_poll_interval = 30
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 100}}))
+    roller = hub.rollers["ABC"]
+    hub.response_parse("!ABCr100b000,R54;")
+    first = roller.serial_position_at
+    assert first is not None
+    hub.response_parse("!ABCr200b000,R54;")
+    assert roller.closed_percent == 100
+    assert roller.serial_position_at == first
+
+
+async def test_serial_tilt_outside_the_range_is_ignored_too(hub):
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 100}}))
+    hub.response_parse("!ABCr040b030,R54;")
+    roller = hub.rollers["ABC"]
+    assert (roller.closed_percent, roller.tilt_percent) == (40, 30)
+    hub.response_parse("!ABCr045b130,R54;")
+    assert (roller.closed_percent, roller.tilt_percent) == (45, 30), "position applied, tilt dropped"
+
+
+@pytest.mark.parametrize("raw", [125, 155, 200, -1, 101, "200"])
+async def test_impossible_shadow_position_keeps_the_last_good_one(hub, caplog, raw):
+    await hub.wsconsumer(shadow_message({"ABC": {"rs": -82, "ol": True, "mp": 100}}))
+    roller = hub.rollers["ABC"]
+    with caplog.at_level(logging.DEBUG, logger=devices.__name__):
+        await hub.wsconsumer(shadow_message({"ABC": {"rs": -80, "ol": True, "mp": raw}}))
+    assert roller.closed_percent == 100
+    assert roller.signal == -80, "the rest of the shade's entry still applies"
+    line = [r for r in caplog.records if "impossible shadow position" in r.getMessage()]
+    assert len(line) == 1 and line[0].levelno == logging.DEBUG
+    assert repr(raw) in line[0].getMessage() and "ABC" in line[0].getMessage()
+
+
 # --- back-off ---------------------------------------------------------------------
 
 

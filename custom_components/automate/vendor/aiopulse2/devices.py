@@ -109,6 +109,26 @@ def next_backoff(current: float, minimum: float, maximum: float) -> float:
     return min(max(current * 2, minimum), maximum)
 
 
+def valid_percent(value) -> Optional[int]:
+    """`value` as an int when it is a percentage a shade can be at (0..100), else None.
+
+    Both paths that report a position accept any integer as it arrives: the serial
+    "!<id>r<ddd>b<ddd>,R<hh>;" reply is three digits, so 000..999, and the hub
+    shadow's "mp" is whatever JSON number the hub wrote. A hub has reported 125,
+    155 and 200 for a shade that was closed (100) and never moved (2026-11-03 and
+    2026-11-05), which the cover entity turned into a negative position and an
+    "open" state. A reading outside the range is not a position at all, so the
+    caller keeps the last good value instead of storing or clamping it.
+    """
+    try:
+        percent = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= percent <= 100:
+        return percent
+    return None
+
+
 def _repair_truncated_json(msg: str):
     """Parse a hub message, repairing the Pulse Pro's truncation if needed.
 
@@ -335,14 +355,36 @@ class Hub:
             return
         # Live values from the motor: position and signal both follow the
         # "live wins until stale" rule (use_ws_signal, use_ws_position), so the cached
-        # shadow cannot flap them back between sweep replies.
-        changed = self.applychanges(
-            roller,
-            {
-                "closed_percent": forcetoint(closedpercent),
-                "tilt_percent": forcetoint(tiltpercent),
-            },
-        )
+        # shadow cannot flap them back between sweep replies. A position outside
+        # 0..100 is not a reading (see valid_percent): it is dropped, the roller
+        # keeps its last good value, and serial_position_at is left alone so the
+        # hub's shadow is not held back on the strength of a reading we threw away.
+        newvals: Dict[str, Any] = {}
+        closed = valid_percent(closedpercent)
+        if closed is None:
+            _LOGGER.debug(
+                "%s: ignoring impossible serial position %r for roller %s (%s); keeping %r",
+                self.host,
+                closedpercent,
+                id,
+                roller.name,
+                roller.closed_percent,
+            )
+        else:
+            newvals["closed_percent"] = closed
+        tilt = valid_percent(tiltpercent)
+        if tilt is None:
+            _LOGGER.debug(
+                "%s: ignoring impossible serial tilt %r for roller %s (%s); keeping %r",
+                self.host,
+                tiltpercent,
+                id,
+                roller.name,
+                roller.tilt_percent,
+            )
+        else:
+            newvals["tilt_percent"] = tilt
+        changed = self.applychanges(roller, newvals)
         changed = roller.set_signal(signal) or changed
         if roller.signal_missed or roller.signal_stale:
             # A reply after a miss or a stale spell restores the reading even if
@@ -352,7 +394,8 @@ class Hub:
             changed = True
         now = time.monotonic()
         roller.serial_signal_at = now
-        roller.serial_position_at = now
+        if closed is not None:
+            roller.serial_position_at = now
         if changed:
             roller.notify_callback()
 
@@ -764,10 +807,19 @@ class Hub:
         if "ol" in roller:
             newvals["online"] = bool(roller["ol"])
         if roller.get("mp") is not None and self.use_ws_position(current):
-            try:
-                newvals["closed_percent"] = int(roller["mp"])
-            except (TypeError, ValueError):
-                _LOGGER.debug("Roller %s: unusable position %r", rollerid, roller["mp"])
+            closed = valid_percent(roller["mp"])
+            if closed is None:
+                # Not a number, or outside 0..100: keep the last good position
+                _LOGGER.debug(
+                    "%s: ignoring impossible shadow position %r for roller %s (%s); keeping %r",
+                    self.host,
+                    roller["mp"],
+                    rollerid,
+                    current.name,
+                    current.closed_percent,
+                )
+            else:
+                newvals["closed_percent"] = closed
         if "vo" not in roller:
             # The voltage and version key is missing, request more details if
             # not already sent. If this request is not made, it will typically

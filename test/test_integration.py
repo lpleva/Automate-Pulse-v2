@@ -217,6 +217,29 @@ async def test_signal_sensor_stays_in_dbm_after_a_serial_reading(hass, config_en
     assert hass.states.get("sensor.kitchen_signal").state == "-82"
 
 
+@pytest.mark.parametrize("raw", ["125", "155", "200"])
+async def test_an_impossible_position_does_not_open_a_closed_shade(hass, config_entry, raw):
+    """Recorder history 2026-11-03/05: a closed, unmoved shade showed "open" at -25/-55/-100."""
+    hub = await _setup(hass, config_entry)
+    await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 100}}, names={"ABC": "Kitchen"})
+    cover = hass.states.get("cover.kitchen")
+    assert (cover.state, cover.attributes["current_position"]) == ("closed", 0)
+
+    hub.api.response_parse(f"!ABCr{raw}b000,R54;")  # the serial sweep's reply
+    await settle(hass)
+    cover = hass.states.get("cover.kitchen")
+    assert (cover.state, cover.attributes["current_position"]) == ("closed", 0)
+    assert hass.states.get("sensor.kitchen_signal").state == "-92", "the signal in that reply is fine"
+
+    await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": int(raw)}})  # the hub's shadow
+    cover = hass.states.get("cover.kitchen")
+    assert (cover.state, cover.attributes["current_position"]) == ("closed", 0)
+
+    await feed(hass, hub, {"ABC": {"rs": -82, "ol": True, "mp": 40}})  # a real move still lands
+    cover = hass.states.get("cover.kitchen")
+    assert (cover.state, cover.attributes["current_position"]) == ("open", 60)
+
+
 def _sweep_entry(hass):
     entry = MockConfigEntry(
         domain=DOMAIN,
