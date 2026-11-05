@@ -9,6 +9,22 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ### Fixed
 
+- **A closed shade no longer flashes "open" with a negative position.** The hub
+  sometimes reports a position that cannot exist: 125, 155 and 200 for shades
+  that were closed (100) and had not moved (`cover.master_bedroom_main`
+  2026-11-05, `cover.living_room_center` 2026-11-03 and 2026-11-05). Both
+  places a position arrives took any integer: the serial reply to the sweep's
+  `!<id>r?;` query is three digits (000..999), and the hub shadow's `mp` is
+  whatever number the hub wrote. The cover entity computes `100 - closed
+  percent`, so 125 became position -25 and, because -25 is not "closed", state
+  "open", until the next good reading flipped it back a few minutes later. A
+  position outside 0..100 is now dropped by the library on both paths: the
+  shade keeps its last good position and state, the reply's signal reading is
+  still used, a dropped serial reading does not count as a fresh live reading,
+  and one debug line records the raw value and the shade so it can be chased
+  later (`ignoring impossible serial position '125' for roller M4G ...`).
+  Nothing is clamped to 0 or 100, since a garbled reading could be wrong in
+  either direction.
 - **Two hubs can both hold a motor with the same id.** A motor id ("M4G") is
   three characters the HUB assigns at pairing, so it is only unique per hub,
   and the house now has two: the living room's right shade on one hub and the
