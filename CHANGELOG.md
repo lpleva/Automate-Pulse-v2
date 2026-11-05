@@ -17,14 +17,20 @@ merges upstream into it and the delta is audited before it reaches `main`.
   `!<id>r?;` query is three digits (000..999), and the hub shadow's `mp` is
   whatever number the hub wrote. The cover entity computes `100 - closed
   percent`, so 125 became position -25 and, because -25 is not "closed", state
-  "open", until the next good reading flipped it back a few minutes later. A
-  position outside 0..100 is now dropped by the library on both paths: the
-  shade keeps its last good position and state, the reply's signal reading is
-  still used, a dropped serial reading does not count as a fresh live reading,
-  and one debug line records the raw value and the shade so it can be chased
-  later (`ignoring impossible serial position '125' for roller M4G ...`).
-  Nothing is clamped to 0 or 100, since a garbled reading could be wrong in
-  either direction.
+  "open", until the next good reading flipped it back. The timing points to
+  the serial path: each bad value lasted exactly one sweep round, the time
+  until the sweep queried that shade again (1.5 min on the 2-shade hub, 4.5 min
+  on the 8-shade hub), while the hub's shadow is polled every 10 s. A position
+  outside 0..100 is now dropped by the library on both paths: the shade keeps
+  its last good position and state, the reply's signal reading is still used,
+  a dropped serial reading does not count as a fresh live reading, and one
+  debug line records the raw value and the shade (`ignoring impossible serial
+  position '125' for roller M4G ...`). Because production runs without debug
+  logging, each shade also counts its rejected readings and keeps the last
+  one (raw value, which path, how long ago), shown in the diagnostics dump
+  under the shade's `position` section as `rejected_readings` and
+  `last_rejected_reading`. Nothing is clamped to 0 or 100, since a garbled
+  reading could be wrong in either direction.
 - **Two hubs can both hold a motor with the same id.** A motor id ("M4G") is
   three characters the HUB assigns at pairing, so it is only unique per hub,
   and the house now has two: the living room's right shade on one hub and the
