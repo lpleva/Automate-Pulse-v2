@@ -240,6 +240,18 @@ def _shade_section(
             "action": roller.action.name,
             "live_reading_age_s": _age(now, roller.serial_position_at),
             "live_reading_in_use": not hub.use_ws_position(roller),
+            # Readings outside 0..100 the library dropped (the hub has sent 125,
+            # 155 and 200 for a closed shade); the state never showed them.
+            "rejected_readings": roller.rejected_positions,
+            "last_rejected_reading": (
+                {
+                    "raw": roller.last_rejected_position["raw"],
+                    "path": roller.last_rejected_position["path"],
+                    "age_s": _age(now, roller.last_rejected_position["at"]),
+                }
+                if roller.last_rejected_position
+                else None
+            ),
         },
         "signal": {
             "dbm": roller.signal,

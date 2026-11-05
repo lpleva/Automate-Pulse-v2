@@ -137,6 +137,8 @@ async def test_config_entry_diagnostics_cover_the_hub_and_every_shade(hass, hass
     assert kitchen["position"]["cover_position"] == 50
     assert kitchen["position"]["action"] == "stopped"
     assert kitchen["position"]["live_reading_in_use"] is True
+    assert kitchen["position"]["rejected_readings"] == 0
+    assert kitchen["position"]["last_rejected_reading"] is None
     assert kitchen["signal"]["dbm"] == -92
     assert kitchen["signal"]["sensor_reading_dbm"] == -92
     assert kitchen["signal"]["live_reading_fresh"] is True
@@ -165,6 +167,28 @@ async def test_config_entry_diagnostics_cover_the_hub_and_every_shade(hass, hass
     assert office["signal"]["live_reading_age_s"] is None
     assert office["battery"] == {"has_battery": False, "voltage": None, "percent": None}
     assert office["motor"]["vo"] is None
+
+
+async def test_rejected_position_readings_show_in_the_dump(hass, hass_client):
+    """A production install has no debug log; the dump is where a dropped reading leaves a trace."""
+    entry = _sweep_entry(hass)
+    hub = await _setup(hass, entry)
+    await _two_shades(hass, hub)
+    hub.api.response_parse("!ABCr100b000,R54;")  # closed, for real
+    hub.api.response_parse("!ABCr125b000,R54;")  # the 2026-11-05 reading
+    await settle(hass)
+
+    diag = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+    kitchen = diag["shades"]["ABC"]["position"]
+    assert kitchen["closed_percent"] == 100, "the dropped reading never became the position"
+    assert kitchen["cover_position"] == 0
+    assert kitchen["rejected_readings"] == 1
+    assert kitchen["last_rejected_reading"]["raw"] == "125"
+    assert kitchen["last_rejected_reading"]["path"] == "serial"
+    assert kitchen["last_rejected_reading"]["age_s"] < 5
+    assert kitchen["live_reading_age_s"] < 5, "the good reading before it still counts as live"
+    office = diag["shades"]["DEF"]["position"]
+    assert office["rejected_readings"] == 0 and office["last_rejected_reading"] is None
 
 
 async def test_the_shadow_passes_through_with_every_field_the_hub_sent(hass, hass_client, config_entry):
