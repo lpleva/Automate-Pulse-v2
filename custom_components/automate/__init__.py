@@ -53,13 +53,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version > 2:
         return False
     if entry.version == 1:
-        _migrate_ids_to_hub_scope(hass, entry)
+        await _migrate_ids_to_hub_scope(hass, entry)
         hass.config_entries.async_update_entry(entry, version=2)
         _LOGGER.info("Migrated entry %s to version 2 (hub-qualified shade ids)", entry.title)
     return True
 
 
-def _migrate_ids_to_hub_scope(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _migrate_ids_to_hub_scope(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Prefix this entry's shade entity unique ids and device identifiers with its scope."""
     scope = entry_scope(entry)
     prefix = f"{scope}_"
@@ -81,7 +81,7 @@ def _migrate_ids_to_hub_scope(hass: HomeAssistant, entry: ConfigEntry) -> None:
             return None
         return {"new_unique_id": new_unique_id}
 
-    er.async_migrate_entries(hass, entry.entry_id, migrate_entity)
+    await er.async_migrate_entries(hass, entry.entry_id, migrate_entity)
 
     dev_reg = dr.async_get(hass)
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
