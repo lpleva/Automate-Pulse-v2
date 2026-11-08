@@ -1,4 +1,4 @@
-"""The integration's actions: `automate.refresh_signal`."""
+"""The integration's actions: `automate.refresh` and `automate.refresh_signal`."""
 
 import logging
 
@@ -8,22 +8,23 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 
-from .const import DOMAIN, SERVICE_REFRESH_SIGNAL
+from .const import DOMAIN, SERVICE_REFRESH, SERVICE_REFRESH_SIGNAL
 
 _LOGGER = logging.getLogger(__name__)
 
 # Standard targets only (entity_id, device_id, area_id, floor_id, label_id), at
-# least one of them; nothing else is accepted.
-REFRESH_SIGNAL_SCHEMA = cv.make_entity_service_schema({})
+# least one of them; nothing else is accepted. The same schema for both actions.
+REFRESH_SCHEMA = cv.make_entity_service_schema({})
 
 
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
     """Register the integration's actions, once."""
-    if hass.services.has_service(DOMAIN, SERVICE_REFRESH_SIGNAL):
+    if hass.services.has_service(DOMAIN, SERVICE_REFRESH):
         return
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH, _async_refresh, schema=REFRESH_SCHEMA)
     hass.services.async_register(
-        DOMAIN, SERVICE_REFRESH_SIGNAL, _async_refresh_signal, schema=REFRESH_SIGNAL_SCHEMA
+        DOMAIN, SERVICE_REFRESH_SIGNAL, _async_refresh_signal, schema=REFRESH_SCHEMA
     )
 
 
@@ -50,25 +51,19 @@ def _targeted_entity_ids(call: ServiceCall) -> tuple[list[str], set[str]]:
     return [entity_id for entity_id in ordered if entity_id in targeted], selected.referenced
 
 
-async def _async_refresh_signal(call: ServiceCall) -> None:
-    """Query each targeted shade's live signal, one after another.
+def _targeted_shades(call: ServiceCall, service: str) -> list[tuple]:
+    """(entity_id, hub, roller) for each shade the call targets, in target order, once each.
 
-    A target may be any of a shade's entities (its cover, its Refresh signal
-    button, a sensor); a shade targeted more than once is queried once. An
-    explicitly named entity that is not one of this integration's is a warning;
-    an entity reached through a device, area, floor or label that is not one of
-    ours (the lights in the same room) is skipped silently, as Home Assistant's
-    own entity services do. A disconnected hub, an offline shade, an unreachable
-    serial port or a silent shade is a warning in the log for that shade, never
-    an exception out of the action: the other shades still get their turn. The
-    library keeps the serial sessions apart (one at a time, 0.75 s between).
+    A target may be any of a shade's entities (its cover, its Refresh button, a
+    sensor); a shade targeted more than once is listed once. An explicitly named
+    entity that is not one of this integration's is a warning; an entity reached
+    through a device, area, floor or label that is not one of ours (the lights in
+    the same room) is skipped silently, as Home Assistant's own entity services do.
     """
-    hass = call.hass
-    ent_reg = er.async_get(hass)
-    hubs = hass.data.get(DOMAIN, {})
-
+    ent_reg = er.async_get(call.hass)
+    hubs = call.hass.data.get(DOMAIN, {})
     entity_ids, explicit = _targeted_entity_ids(call)
-    queue = []  # (entity_id, hub, roller), one per shade, in target order
+    queue = []
     seen = set()
     for entity_id in entity_ids:
         entry = ent_reg.async_get(entity_id)
@@ -79,7 +74,7 @@ async def _async_refresh_signal(call: ServiceCall) -> None:
                 _LOGGER.warning(
                     "%s.%s: %s is not one of this integration's shade entities, skipped",
                     DOMAIN,
-                    SERVICE_REFRESH_SIGNAL,
+                    service,
                     entity_id,
                 )
             continue
@@ -87,8 +82,36 @@ async def _async_refresh_signal(call: ServiceCall) -> None:
             continue
         seen.add((id(hub), roller.id))
         queue.append((entity_id, hub, roller))
+    return queue
 
-    for entity_id, hub, roller in queue:
+
+async def _async_refresh(call: ServiceCall) -> None:
+    """Refresh each targeted shade's signal, position and battery, one after another.
+
+    What the Refresh button does, per shade (PulseHub.async_refresh). A hub
+    that is disconnected, a shade that is offline, a query that could not be
+    sent or a shade that did not answer is a warning in the log for that shade,
+    with the same message the button shows, never an exception out of the
+    action: the other shades still get their turn. The library keeps the serial
+    sessions apart (one at a time, 0.75 s between) and sends at most one battery
+    query per shade per poll interval.
+    """
+    for entity_id, hub, roller in _targeted_shades(call, SERVICE_REFRESH):
+        try:
+            await hub.async_refresh(roller)
+        except HomeAssistantError as err:
+            _LOGGER.warning("%s.%s: %s: %s", DOMAIN, SERVICE_REFRESH, entity_id, err)
+
+
+async def _async_refresh_signal(call: ServiceCall) -> None:
+    """Query each targeted shade's live signal, one after another; the battery is not touched.
+
+    The action from before 1.7.0, kept as it was for anything that calls it:
+    the serial query alone, so an automation that watches signal quality on a
+    schedule does not also make the hub re-read every motor. Same targets, same
+    per-shade warnings as `automate.refresh`.
+    """
+    for entity_id, hub, roller in _targeted_shades(call, SERVICE_REFRESH_SIGNAL):
         try:
             replied = await hub.async_refresh_signal(roller)
         except HomeAssistantError as err:

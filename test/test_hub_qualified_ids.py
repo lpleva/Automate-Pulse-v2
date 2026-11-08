@@ -56,7 +56,7 @@ async def test_every_shade_id_carries_the_hub_id(hass, config_entry):
         "cover.living_room_right": shade_id("M4G"),
         "sensor.living_room_right_signal": shade_id("M4G", suffix="_signal"),
         "sensor.living_room_right_battery": shade_id("M4G", suffix="_battery"),
-        "button.living_room_right_refresh_signal": shade_id("M4G", suffix="_refresh_signal"),
+        "button.living_room_right_refresh": shade_id("M4G", suffix="_refresh_signal"),
     }
     for entity_id, unique_id in expected.items():
         entry = ent_reg.async_get(entity_id)
@@ -133,7 +133,7 @@ async def test_two_hubs_with_the_same_motor_id_coexist(hass, config_entry):
     for suffix in ("_signal", "_battery"):
         assert hass.states.get(f"sensor.living_room_right{suffix}") is not None
         assert hass.states.get(f"sensor.spare_bedroom_side{suffix}") is not None
-    assert hass.states.get("button.spare_bedroom_side_refresh_signal") is not None
+    assert hass.states.get("button.spare_bedroom_side_refresh") is not None
 
     ent_reg = er.async_get(hass)
     assert ent_reg.async_get("cover.living_room_right").unique_id == shade_id("M4G")
@@ -169,7 +169,7 @@ async def test_the_action_queries_each_hubs_own_m4g(hass, config_entry):
     await hass.services.async_call(
         DOMAIN,
         "refresh_signal",
-        {"entity_id": ["cover.spare_bedroom_side", "button.living_room_right_refresh_signal"]},
+        {"entity_id": ["cover.spare_bedroom_side", "button.living_room_right_refresh"]},
         blocking=True,
     )
     hub_a.async_refresh_signal.assert_awaited_once_with(hub_a.api.rollers["M4G"])

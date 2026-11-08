@@ -105,7 +105,8 @@ _SHADE_ENTITIES = (
     ("battery", "sensor", "_battery"),
     ("signal", "sensor", "_signal"),
     ("missed_signal_checks", "sensor", "_signal_misses"),
-    ("refresh_signal", "button", "_refresh_signal"),
+    # The Refresh button keeps the suffix it was born with ("Refresh signal", 1.5.0)
+    ("refresh", "button", "_refresh_signal"),
 )
 
 

@@ -198,6 +198,27 @@ class PulseHub:
             return None
         return self.api.rollers[roller_id]
 
+    @staticmethod
+    def _shade_name(roller: aiopulse2.Roller) -> str:
+        return roller.name or f"Shade {roller.id}"
+
+    def _check_shade_reachable(self, roller: aiopulse2.Roller, what: str) -> None:
+        """Raise a HomeAssistantError fit for a toast when no query can reach the shade.
+
+        Both query paths need the hub connected and the shade online (the hub
+        relays either one over radio), and a shade the hub has dropped has no
+        path at all. `what` names the refresh in the message ("the signal of
+        Kitchen", "Kitchen").
+        """
+        if self.api is None or not self.api.connected:
+            raise HomeAssistantError(
+                f"Cannot refresh {what}: the hub at {self.host} is not connected"
+            )
+        if roller.id not in self.api.rollers:
+            raise HomeAssistantError(f"Cannot refresh {what}: it is no longer known to the hub")
+        if not roller.online:
+            raise HomeAssistantError(f"Cannot refresh {what}: the hub reports it offline")
+
     async def async_refresh_signal(self, roller: aiopulse2.Roller) -> bool:
         """Ask one shade for a live signal reading now; True when it answered.
 
@@ -207,27 +228,93 @@ class PulseHub:
         the query cannot be sent: the hub is disconnected, the shade is offline,
         or the hub's serial port cannot be reached. A shade that simply does not
         answer is not an error here: it returns False, and the caller decides.
+        The battery is not touched; that is async_refresh.
         """
-        name = roller.name or f"Shade {roller.id}"
-        if self.api is None or not self.api.connected:
-            raise HomeAssistantError(
-                f"Cannot refresh the signal of {name}: the hub at {self.host} is not connected"
-            )
-        if not roller.online:
-            raise HomeAssistantError(
-                f"Cannot refresh the signal of {name}: the hub reports it offline"
-            )
+        what = f"the signal of {self._shade_name(roller)}"
+        self._check_shade_reachable(roller, what)
         try:
             return await self.api.query_signal(roller.id)
         except KeyError:
             raise HomeAssistantError(
-                f"Cannot refresh the signal of {name}: it is no longer known to the hub"
+                f"Cannot refresh {what}: it is no longer known to the hub"
             ) from None
         except (OSError, asyncio.TimeoutError) as err:
             raise HomeAssistantError(
-                f"Cannot refresh the signal of {name}: the hub's serial port "
+                f"Cannot refresh {what}: the hub's serial port "
                 f"{self.api.serial_port} could not be reached ({err})"
             ) from err
+
+    async def async_refresh(self, roller: aiopulse2.Roller) -> None:
+        """Refresh one shade's signal, position AND battery now.
+
+        Two read queries, both over the library's existing connections: the
+        serial `!<id>r?;` query (signal and position land from the reply at
+        once), then the websocket shadow `query: true` for the shade (the hub
+        re-reads the motor, and the next shadow poll brings a fresh voltage,
+        which the battery sensor follows). Serial first, so the reply or the
+        miss is in hand before the hub is asked to talk to the same motor: the
+        two radio exchanges do not overlap. Both parts are always attempted
+        once the shade is reachable at all; a failure of one never stops the
+        other. Returns quietly when everything worked. Otherwise raises ONE
+        HomeAssistantError, fit for a toast, naming the shade, each part that
+        failed and why, and what did work, so neither part's result hides the
+        other's. The battery query is spaced by the library (one per shade per
+        poll interval); a press inside that window shares the pending request
+        and is not a failure.
+        """
+        name = self._shade_name(roller)
+        self._check_shade_reachable(roller, name)
+        failed: list[str] = []
+        worked: list[str] = []
+
+        replied = False
+        try:
+            replied = await self.api.query_signal(roller.id)
+        except KeyError:
+            raise HomeAssistantError(
+                f"Cannot refresh {name}: it is no longer known to the hub"
+            ) from None
+        except (OSError, asyncio.TimeoutError) as err:
+            failed.append(
+                "the signal query could not be sent (the hub's serial port "
+                f"{self.api.serial_port} could not be reached: {err})"
+            )
+        else:
+            if replied:
+                worked.append("the signal query was answered")
+            else:
+                failed.append(
+                    "it did not answer the signal query (the hub could not reach it over radio)"
+                )
+
+        try:
+            sent = await self.api.query_details(roller.id)
+        except KeyError:
+            raise HomeAssistantError(
+                f"Cannot refresh {name}: it is no longer known to the hub"
+            ) from None
+        except (aiopulse2.NotConnectedException, aiopulse2.NotRunningException):
+            failed.append(
+                "the battery query could not be sent (the hub's websocket is not connected)"
+            )
+        else:
+            if sent:
+                worked.append(
+                    "the battery query was sent, so the next hub poll may bring a fresh reading"
+                )
+            else:
+                worked.append(
+                    "a battery query from the last "
+                    f"{self.api.details_query_spacing():.0f} s is still pending, "
+                    "so the next hub poll may bring a fresh reading"
+                )
+
+        if not failed:
+            return
+        message = f"Cannot refresh {name}: " + "; ".join(failed)
+        if worked:
+            message += ". Still, " + "; ".join(worked)
+        raise HomeAssistantError(message)
 
     def _hub_device_info(self) -> dict:
         """Device registry fields for the hub itself, from what it reported."""

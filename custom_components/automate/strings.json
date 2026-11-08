@@ -31,9 +31,13 @@
     }
   },
   "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Refreshes each targeted shade's signal, position and battery right now, one shade at a time: the live radio query the signal sweep sends (the Signal sensor and the position update when the shade answers) and a request for the hub to re-read the motor (the Battery sensor updates on the next hub poll). What the shade's Refresh button does. Target a shade's cover or its Refresh button. Never moves a shade."
+    },
     "refresh_signal": {
       "name": "Refresh signal",
-      "description": "Asks each targeted shade for a live radio signal reading right now, one shade at a time, the same query the live signal sweep sends. The shade's Signal sensor updates when it answers. Target a shade's cover or its Refresh signal button. Never moves a shade."
+      "description": "Asks each targeted shade for a live radio signal reading right now, one shade at a time, the same query the live signal sweep sends; the battery is not refreshed (use Refresh for that). The shade's Signal sensor and position update when it answers. Target a shade's cover or its Refresh button. Never moves a shade."
     }
   }
 }

@@ -24,6 +24,11 @@ CONF_AUTO_TITLE = "auto_title"
 # Seconds the config flow waits for the hub's first reply before giving up.
 CONNECT_TEST_TIMEOUT = 20
 
-# The `automate.refresh_signal` action: one live signal query per targeted shade.
-# The library spaces the serial sessions (aiopulse2 SERIAL_SESSION_SPACING).
+# The actions. `automate.refresh`: signal, position and battery per targeted
+# shade (the serial query plus the websocket shadow `query`), what the Refresh
+# button does. `automate.refresh_signal`: the serial signal query alone, kept
+# for callers from before 1.7.0. The library spaces the serial sessions
+# (aiopulse2 SERIAL_SESSION_SPACING) and the shadow queries
+# (Hub.details_query_spacing).
+SERVICE_REFRESH = "refresh"
 SERVICE_REFRESH_SIGNAL = "refresh_signal"

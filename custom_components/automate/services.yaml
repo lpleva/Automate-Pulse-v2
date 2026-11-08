@@ -1,3 +1,10 @@
+refresh:
+  target:
+    entity:
+      integration: automate
+      domain:
+        - cover
+        - button
 refresh_signal:
   target:
     entity:

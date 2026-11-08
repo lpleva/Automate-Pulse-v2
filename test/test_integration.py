@@ -1,7 +1,7 @@
 """The integration on Home Assistant 2026.9: config flow, entities, devices, options."""
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import voluptuous as vol
@@ -492,12 +492,12 @@ async def test_refresh_signal_button_per_shade(hass, config_entry):
 
     ent_reg = er.async_get(hass)
     for entity_id, roller_id, cover in (
-        ("button.kitchen_refresh_signal", "ABC", "cover.kitchen"),
-        ("button.office_refresh_signal", "DEF", "cover.office"),
+        ("button.kitchen_refresh", "ABC", "cover.kitchen"),
+        ("button.office_refresh", "DEF", "cover.office"),
     ):
         state = hass.states.get(entity_id)
         assert state is not None, hass.states.async_entity_ids()
-        assert state.attributes["friendly_name"].endswith("Refresh signal")
+        assert state.attributes["friendly_name"].endswith(" Refresh")
         entry = ent_reg.async_get(entity_id)
         assert entry.unique_id == shade_id(roller_id, suffix="_refresh_signal")
         assert entry.entity_category is er.EntityCategory.DIAGNOSTIC
@@ -507,17 +507,24 @@ async def test_refresh_signal_button_per_shade(hass, config_entry):
 
 @pytest.mark.usefixtures("socket_enabled")
 async def test_pressing_the_button_sends_only_that_shades_query(hass):
-    """One press, one `!<id>r?;` for that shade, nothing else; the sensor follows the reply."""
+    """One press, one `!<id>r?;` for that shade on the serial port, nothing else there;
+    the sensor follows the reply. (The press's websocket half is test_refresh's.)"""
     fake = FakeSerialHub()
     hub = await _setup(hass, _sweep_entry(hass))
     hub.api.host = "127.0.0.1"
     hub.api.serial_port = await fake.start()
+    hub.api.handshake.set()
+    with patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)):
+        await _press_only_serial_checks(hass, hub, fake)
+
+
+async def _press_only_serial_checks(hass, hub, fake):
     try:
         await _two_shades(hass, hub)
         assert hass.states.get("sensor.office_signal").state == STATE_UNKNOWN
 
         await hass.services.async_call(
-            "button", "press", {"entity_id": "button.office_refresh_signal"}, blocking=True
+            "button", "press", {"entity_id": "button.office_refresh"}, blocking=True
         )
         await settle(hass)
 
@@ -527,14 +534,14 @@ async def test_pressing_the_button_sends_only_that_shades_query(hass):
         assert hass.states.get("sensor.kitchen_signal").state == STATE_UNKNOWN, "the other shade untouched"
         misses = hass.states.get("sensor.office_missed_signal_checks")
         assert misses.state == "0" and misses.attributes["checks"] == 1
-        assert hass.states.get("button.office_refresh_signal").state != STATE_UNKNOWN, "pressed"
+        assert hass.states.get("button.office_refresh").state != STATE_UNKNOWN, "pressed"
 
         # Six rapid presses: one session, one query; every press completes
         fake.received.clear()
         await asyncio.gather(
             *(
                 hass.services.async_call(
-                    "button", "press", {"entity_id": "button.office_refresh_signal"}, blocking=True
+                    "button", "press", {"entity_id": "button.office_refresh"}, blocking=True
                 )
                 for _ in range(6)
             )
@@ -550,26 +557,32 @@ async def test_pressing_the_button_sends_only_that_shades_query(hass):
 @pytest.mark.usefixtures("socket_enabled")
 async def test_button_errors_are_clear(hass, monkeypatch, caplog):
     """A disconnected hub, an offline shade, a dead port and a silent shade each say so."""
-    from homeassistant.exceptions import HomeAssistantError
-
     monkeypatch.setattr(devices, "SIGNAL_POLL_REPLY_TIMEOUT", 0.3)
     fake = FakeSerialHub(silent={"ABC"})
     hub = await _setup(hass, _sweep_entry(hass))
     hub.api.host = "127.0.0.1"
     port = await fake.start()
     hub.api.serial_port = port
+    hub.api.handshake.set()  # the websocket half of a press succeeds; test_refresh covers its errors
+    with patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)):
+        await _button_error_checks(hass, hub, fake)
+
+
+async def _button_error_checks(hass, hub, fake):
+    from homeassistant.exceptions import HomeAssistantError
+
     try:
         await _two_shades(hass, hub)
-        button = _button_entity(hass, "button.kitchen_refresh_signal")
+        button = _button_entity(hass, "button.kitchen_refresh")
 
         # Hub disconnected: the button is unavailable, so HA's button.press skips it
         # (its own warning), and a direct press says why.
         hub.api.connected = False
         hub.api.notify_callback()
         await settle(hass)
-        assert hass.states.get("button.kitchen_refresh_signal").state == STATE_UNAVAILABLE
+        assert hass.states.get("button.kitchen_refresh").state == STATE_UNAVAILABLE
         await hass.services.async_call(
-            "button", "press", {"entity_id": "button.kitchen_refresh_signal"}, blocking=True
+            "button", "press", {"entity_id": "button.kitchen_refresh"}, blocking=True
         )
         with pytest.raises(HomeAssistantError, match="not connected"):
             await button.async_press()
@@ -619,7 +632,7 @@ async def test_refresh_signal_action_queries_each_target_in_order(hass, caplog):
             {
                 "entity_id": [
                     "cover.office",
-                    "button.kitchen_refresh_signal",
+                    "button.kitchen_refresh",
                     "cover.kitchen",  # the same shade again: queried once
                     "cover.not_a_shade",
                     "light.kitchen",

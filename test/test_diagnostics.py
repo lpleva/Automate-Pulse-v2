@@ -130,7 +130,7 @@ async def test_config_entry_diagnostics_cover_the_hub_and_every_shade(hass, hass
         "battery": "sensor.kitchen_battery",
         "signal": "sensor.kitchen_signal",
         "missed_signal_checks": "sensor.kitchen_missed_signal_checks",
-        "refresh_signal": "button.kitchen_refresh_signal",
+        "refresh": "button.kitchen_refresh",
     }
     assert kitchen["online"] is True
     assert kitchen["position"]["closed_percent"] == 50, "the live reading"

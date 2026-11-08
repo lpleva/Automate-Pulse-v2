@@ -1,9 +1,8 @@
-"""A "Refresh signal" button per shade: one live signal query, on demand."""
+"""A "Refresh" button per shade: signal, position and battery, on demand."""
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .base import AutomateBase
@@ -20,7 +19,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     @callback
     def async_add_automate_buttons():
         async_add_automate_entities(
-            hass, AutomateRefreshSignal, config_entry, current, async_add_entities
+            hass, AutomateRefresh, config_entry, current, async_add_entities
         )
 
     hub.cleanup_callbacks.append(
@@ -32,26 +31,29 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     )
 
 
-class AutomateRefreshSignal(AutomateBase, ButtonEntity):
-    """Press to ask this shade for a live signal reading right now.
+class AutomateRefresh(AutomateBase, ButtonEntity):
+    """Press to refresh this shade's signal, position and battery right now.
 
-    Sends exactly what the live sweep sends for the shade on its turn (the
-    serial `!<id>r?;` query); the reply updates the shade's Signal sensor
-    through the usual path. It never moves the shade or touches its settings.
-    Diagnostic, so Home Assistant keeps it off auto-generated dashboards.
+    Two read queries through the hub's existing connections (PulseHub.async_refresh):
+    the serial `!<id>r?;` query the live sweep sends, whose reply updates the
+    Signal sensor and the cover position at once, and the websocket shadow
+    `query` for the shade, after which the hub re-reads the motor and the next
+    shadow poll brings a fresh battery voltage. It never moves the shade or
+    touches its settings. Diagnostic, so Home Assistant keeps it off
+    auto-generated dashboards.
+
+    Until 1.6.1 this was "Refresh signal" and sent the serial query alone. The
+    unique id suffix is kept, so an existing install keeps its entity id
+    (`button.<shade>_refresh_signal`) and whatever refers to it; a shade first
+    seen by this release gets `button.<shade>_refresh`.
     """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:wifi-refresh"
-    _attr_name = "Refresh signal"
+    _attr_icon = "mdi:refresh"
+    _attr_name = "Refresh"
     _unique_id_suffix = "_refresh_signal"
 
     async def async_press(self) -> None:
-        """Query the shade; a clear error when the hub, shade or port cannot be reached."""
+        """Refresh the shade; the hub raises a clear HomeAssistantError naming what failed."""
         hub = self.hass.data[DOMAIN][self.config_entry_id]
-        replied = await hub.async_refresh_signal(self.roller)
-        if not replied:
-            raise HomeAssistantError(
-                f"{self.roller.name} did not answer the signal query "
-                "(the hub could not reach it over radio)"
-            )
+        await hub.async_refresh(self.roller)
