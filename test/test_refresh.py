@@ -12,7 +12,7 @@ import re
 import time
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
@@ -67,9 +67,26 @@ async def _hub_with_shades(hass, fake, entry=None, shades=("ABC", "DEF")):
     return hub
 
 
-def _desired(sendws):
+class FakeWebsocket:
+    """Stands in for Hub.sendws: records each payload and yields to the loop once
+    before returning, as a real send does at drain (a stand-in that never yields
+    hides every race between concurrent callers). `ok=False` fails the send."""
+
+    def __init__(self):
+        self.sent = []
+        self.ok = True
+
+    async def __call__(self, payload):
+        await asyncio.sleep(0)
+        if not self.ok:
+            return False
+        self.sent.append(payload)
+        return True
+
+
+def _desired(ws):
     """The `desired` object of every payload written to the websocket, in order."""
-    return [call.args[0]["args"]["desired"] for call in sendws.await_args_list]
+    return [payload["args"]["desired"] for payload in ws.sent]
 
 
 def _query(rid):
@@ -124,14 +141,15 @@ async def test_r1_button_is_named_refresh_and_keeps_its_unique_id_and_entity_id(
 
 async def test_r2_one_press_refreshes_signal_position_and_battery(hass):
     fake = FakeSerialHub()
-    with patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)) as sendws:
+    ws = FakeWebsocket()
+    with patch.object(devices.Hub, "sendws", new=ws):
         hub = await _hub_with_shades(hass, fake)
         try:
             battery = hass.states.get("sensor.office_battery")
             assert battery.state == "83" and battery.attributes[ATTR_VOLTAGE] == 7.9
             assert hass.states.get("sensor.office_signal").state == STATE_UNKNOWN
             assert hass.states.get("cover.office").attributes["current_position"] == 100
-            sendws.reset_mock()
+            ws.sent.clear()
 
             await _press(hass, "button.office_refresh")
 
@@ -142,7 +160,7 @@ async def test_r2_one_press_refreshes_signal_position_and_battery(hass):
             assert hass.states.get("cover.office").attributes["current_position"] == 50
             # The websocket part: the app's queryDevice key, for that shade only,
             # in the envelope the library's other shadow writes use.
-            payloads = [call.args[0] for call in sendws.await_args_list]
+            payloads = list(ws.sent)
             assert len(payloads) == 1, payloads
             assert payloads[0]["method"] == "shadow"
             assert payloads[0]["args"]["desired"] == _query("DEF")
@@ -167,12 +185,13 @@ async def test_r2_one_press_refreshes_signal_position_and_battery(hass):
 
 async def test_r3_refresh_action_does_the_full_refresh_and_refresh_signal_stays_signal_only(hass):
     fake = FakeSerialHub()
-    with patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)) as sendws:
+    ws = FakeWebsocket()
+    with patch.object(devices.Hub, "sendws", new=ws):
         hub = await _hub_with_shades(hass, fake)
         try:
             assert hass.services.has_service(DOMAIN, "refresh")
             assert hass.services.has_service(DOMAIN, "refresh_signal")
-            sendws.reset_mock()
+            ws.sent.clear()
 
             # Targets in the order given, one refresh per shade however often it
             # is named, through any of its entities.
@@ -184,7 +203,7 @@ async def test_r3_refresh_action_does_the_full_refresh_and_refresh_signal_stays_
             )
             await settle(hass)
             assert fake.received == ["!DEFr?;", "!ABCr?;"]
-            assert _desired(sendws) == [_query("DEF"), _query("ABC")]
+            assert _desired(ws) == [_query("DEF"), _query("ABC")]
             assert hass.states.get("sensor.office_signal").state == "-92"
             assert hass.states.get("sensor.kitchen_signal").state == "-92"
             await feed(hass, hub, {"ABC": {**KITCHEN, "vo": "11.9D23"}})
@@ -193,13 +212,13 @@ async def test_r3_refresh_action_does_the_full_refresh_and_refresh_signal_stays_
             # `automate.refresh_signal` is still the signal query alone: the serial
             # `r?` and nothing over the websocket.
             fake.received.clear()
-            sendws.reset_mock()
+            ws.sent.clear()
             await hass.services.async_call(
                 DOMAIN, "refresh_signal", {"entity_id": "cover.office"}, blocking=True
             )
             await settle(hass)
             assert fake.received == ["!DEFr?;"]
-            sendws.assert_not_awaited()
+            assert ws.sent == []
 
             # No target at all is refused by the schema, as for refresh_signal.
             with pytest.raises(vol.Invalid):
@@ -215,27 +234,27 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
     monkeypatch.setattr(devices, "SIGNAL_POLL_REPLY_TIMEOUT", 0.3)
     monkeypatch.setattr(devices, "SEND_HANDSHAKE_TIMEOUT", 0.1)
     fake = FakeSerialHub(silent={"ABC"})
-    sendws = AsyncMock(return_value=True)
-    with patch.object(devices.Hub, "sendws", new=sendws):
+    ws = FakeWebsocket()
+    with patch.object(devices.Hub, "sendws", new=ws):
         hub = await _hub_with_shades(hass, fake, shades=("ABC", "DEF", "GHI"))
         try:
             kitchen = _button_entity(hass, "button.kitchen_refresh")
             office = _button_entity(hass, "button.office_refresh")
             hall = _button_entity(hass, "button.hall_refresh")
-            sendws.reset_mock()
+            ws.sent.clear()
 
             # Hub disconnected: nothing is sent on either path.
             hub.api.connected = False
             with pytest.raises(HomeAssistantError, match="Kitchen.*hub.*not connected"):
                 await kitchen.async_press()
-            assert fake.received == [] and sendws.await_args_list == []
+            assert fake.received == [] and ws.sent == []
             hub.api.connected = True
 
             # Shade offline (the hub says so): nothing is sent.
             await feed(hass, hub, {"ABC": {"ol": False}})
             with pytest.raises(HomeAssistantError, match="Kitchen.*offline"):
                 await kitchen.async_press()
-            assert fake.received == [] and sendws.await_args_list == []
+            assert fake.received == [] and ws.sent == []
             await feed(hass, hub, {"ABC": {"ol": True}})
 
             # Shade out of radio range: the signal query got no answer, the battery
@@ -247,13 +266,13 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
             assert "did not answer the signal query" in message
             assert "battery query was sent" in message
             assert fake.received == ["!ABCr?;"]
-            assert _desired(sendws) == [_query("ABC")]
+            assert _desired(ws) == [_query("ABC")]
 
             # Websocket send fails while the serial port works: the reading lands,
             # the battery part is named, and the part that worked is named too.
             fake.received.clear()
-            sendws.reset_mock()
-            sendws.return_value = False
+            ws.sent.clear()
+            ws.ok = False
             with pytest.raises(HomeAssistantError) as err:
                 await office.async_press()
             await settle(hass)
@@ -265,7 +284,7 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
             assert hass.states.get("sensor.office_signal").state == "-92"
 
             # Websocket not connected at all (no handshake): same message, no 10 s wait.
-            sendws.return_value = True
+            ws.ok = True
             hub.api.handshake.clear()
             fake.received.clear()
             with pytest.raises(HomeAssistantError, match="Office.*battery query could not be sent.*websocket"):
@@ -276,18 +295,18 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
             # Serial port dead, websocket fine: the serial part is named, the battery
             # query still went out.
             await fake.stop()
-            sendws.reset_mock()
+            ws.sent.clear()
             with pytest.raises(HomeAssistantError) as err:
                 await office.async_press()
             message = str(err.value)
             assert "Office" in message
             assert "signal query could not be sent" in message and "serial port" in message
             assert "battery query was sent" in message
-            assert _desired(sendws) == [_query("DEF")]
+            assert _desired(ws) == [_query("DEF")]
 
             # Both dead: both parts named.
-            sendws.reset_mock()
-            sendws.return_value = False
+            ws.sent.clear()
+            ws.ok = False
             with pytest.raises(HomeAssistantError) as err:
                 await hall.async_press()
             message = str(err.value)
@@ -301,7 +320,7 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
                 await hall.async_press()
 
             # The action logs the same message per shade and carries on.
-            sendws.return_value = True
+            ws.ok = True
             caplog.clear()
             await hass.services.async_call(
                 DOMAIN, "refresh", {"entity_id": ["cover.kitchen", "cover.office"]}, blocking=True
@@ -325,21 +344,22 @@ async def test_r5_rapid_presses_share_one_serial_and_one_websocket_query(hass, m
         devices, "time", types.SimpleNamespace(monotonic=clock.monotonic, time=time.time)
     )
     fake = FakeSerialHub()
+    ws = FakeWebsocket()
     with (
-        patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)) as sendws,
+        patch.object(devices.Hub, "sendws", new=ws),
         patch.object(devices.websockets, "connect") as ws_connect,
     ):
         hub = await _hub_with_shades(hass, fake, entry=_entry(hass, poll_interval=30))
         try:
             assert hub.api.details_query_spacing() == 30, "the hub's poll interval"
-            sendws.reset_mock()
+            ws.sent.clear()
             connections = fake.connections
 
             await asyncio.gather(*(_press(hass, "button.office_refresh") for _ in range(6)))
             await settle(hass)
             assert fake.received == ["!DEFr?;"]
             assert fake.connections == connections + 1, "one serial session, under the library's lock"
-            assert _desired(sendws) == [_query("DEF")]
+            assert _desired(ws) == [_query("DEF")]
             ws_connect.assert_not_called(), "no second websocket"
             assert hass.states.get("sensor.office_missed_signal_checks").attributes["checks"] == 1
 
@@ -347,16 +367,16 @@ async def test_r5_rapid_presses_share_one_serial_and_one_websocket_query(hass, m
             clock.now += 10
             await _press(hass, "button.office_refresh")
             assert fake.received == ["!DEFr?;", "!DEFr?;"]
-            assert _desired(sendws) == [_query("DEF")]
+            assert _desired(ws) == [_query("DEF")]
 
             # Another shade is not held back by the first one's query
             await _press(hass, "button.kitchen_refresh")
-            assert _desired(sendws) == [_query("DEF"), _query("ABC")]
+            assert _desired(ws) == [_query("DEF"), _query("ABC")]
 
             # Past the spacing: a new battery query for the office
             clock.now += 21
             await _press(hass, "button.office_refresh")
-            assert _desired(sendws) == [_query("DEF"), _query("ABC"), _query("DEF")]
+            assert _desired(ws) == [_query("DEF"), _query("ABC"), _query("DEF")]
             assert fake.received == ["!DEFr?;", "!DEFr?;", "!ABCr?;", "!DEFr?;"]
         finally:
             await fake.stop()
@@ -376,8 +396,13 @@ async def test_r5_library_query_details_uses_send_payload_and_is_spaced_per_shad
     sent = []
 
     async def fake_sendws(payload):
+        await asyncio.sleep(0)  # a real send yields at drain
         sent.append(payload)
         return True
+
+    async def failing_sendws(payload):
+        await asyncio.sleep(0)
+        return False
 
     monkeypatch.setattr(hub, "sendws", fake_sendws)
     await hub.wsconsumer(shadow_message({"ABC": KITCHEN, "DEF": OFFICE}))
@@ -386,7 +411,10 @@ async def test_r5_library_query_details_uses_send_payload_and_is_spaced_per_shad
     assert devices.Hub(HUB_HOST, poll_interval=2).details_query_spacing() == 10, "floor for a fast poll"
     assert devices.Hub(HUB_HOST, poll_interval=300).details_query_spacing() == 300
 
-    assert await hub.query_details("ABC") is True
+    results = await asyncio.gather(*(hub.query_details("ABC") for _ in range(6)))
+    assert results == [True] * 6, "six concurrent callers all get the one send's result"
+    assert len(sent) == 1, "and exactly one payload went out"
+    assert hub._details_queries == {}, "nothing left in flight"
     assert await hub.query_details("ABC") is False, "shared with the one just sent"
     assert await hub.query_details("DEF") is True, "spaced per shade, not per hub"
     assert [p["args"]["desired"] for p in sent] == [_query("ABC"), _query("DEF")]
@@ -399,10 +427,16 @@ async def test_r5_library_query_details_uses_send_payload_and_is_spaced_per_shad
 
     with pytest.raises(KeyError):
         await hub.query_details("ZZZ")
+    # The hub dropped a shade: its records go with it, so the dicts mirror `rollers`.
+    assert "DEF" in hub._details_queried_at
+    hub.rollers.pop("DEF")
+    with pytest.raises(KeyError):
+        await hub.query_details("DEF")
+    assert "DEF" not in hub._details_queried_at and "DEF" not in hub._details_queries
 
     # A send that failed is not recorded: the next call sends.
     clock.now += 60
-    monkeypatch.setattr(hub, "sendws", AsyncMock(return_value=False))
+    monkeypatch.setattr(hub, "sendws", failing_sendws)
     with pytest.raises(errors.NotConnectedException):
         await hub.query_details("ABC")
     monkeypatch.setattr(hub, "sendws", fake_sendws)
@@ -423,16 +457,17 @@ async def test_r6_refresh_sends_only_read_queries(hass):
     """Every shade refreshed: `r?` on the serial port and `query` over the websocket,
     nothing that moves a shade or touches its limits."""
     fake = FakeSerialHub()
-    with patch.object(devices.Hub, "sendws", new=AsyncMock(return_value=True)) as sendws:
+    ws = FakeWebsocket()
+    with patch.object(devices.Hub, "sendws", new=ws):
         hub = await _hub_with_shades(hass, fake, shades=("ABC", "DEF", "GHI"))
         try:
-            sendws.reset_mock()
+            ws.sent.clear()
             await hass.services.async_call(DOMAIN, "refresh", {"entity_id": "all"}, blocking=True)
             await settle(hass)
 
             assert sorted(fake.received) == ["!ABCr?;", "!DEFr?;", "!GHIr?;"]
             assert all(re.fullmatch(r"!\w{3}r\?;", cmd) for cmd in fake.received)
-            payloads = [call.args[0] for call in sendws.await_args_list]
+            payloads = list(ws.sent)
             assert len(payloads) == 3
             for payload in payloads:
                 assert payload["method"] == "shadow"
