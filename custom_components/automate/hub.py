@@ -250,8 +250,9 @@ class PulseHub:
         Two read queries, both over the library's existing connections: the
         serial `!<id>r?;` query (signal and position land from the reply at
         once), then the websocket shadow `query: true` for the shade (the hub
-        re-reads the motor, and the next shadow poll brings a fresh voltage,
-        which the battery sensor follows). Serial first, so the reply or the
+        re-reads the motor over radio, and the next shadow poll or the one
+        after brings a fresh voltage, which the battery sensor follows). Serial
+        first, so the reply or the
         miss is in hand before the hub is asked to talk to the same motor: the
         two radio exchanges do not overlap. Both parts are always attempted
         once the shade is reachable at all; a failure of one never stops the
@@ -290,9 +291,11 @@ class PulseHub:
         try:
             sent = await self.api.query_details(roller.id)
         except KeyError:
-            raise HomeAssistantError(
-                f"Cannot refresh {name}: it is no longer known to the hub"
-            ) from None
+            # The hub dropped the shade between the two queries: the serial
+            # result above still stands and is reported with this.
+            failed.append(
+                "the battery query could not be sent (the shade is no longer known to the hub)"
+            )
         except (aiopulse2.NotConnectedException, aiopulse2.NotRunningException):
             failed.append(
                 "the battery query could not be sent (the hub's websocket is not connected)"
@@ -300,13 +303,14 @@ class PulseHub:
         else:
             if sent:
                 worked.append(
-                    "the battery query was sent, so the next hub poll may bring a fresh reading"
+                    "the battery query was sent, so the next hub poll or the one after "
+                    "brings a fresh reading"
                 )
             else:
                 worked.append(
                     "a battery query from the last "
                     f"{self.api.details_query_spacing():.0f} s is still pending, "
-                    "so the next hub poll may bring a fresh reading"
+                    "so the next hub poll or the one after brings a fresh reading"
                 )
 
         if not failed:

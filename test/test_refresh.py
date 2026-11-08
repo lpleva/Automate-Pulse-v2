@@ -333,6 +333,36 @@ async def test_r4_errors_name_the_shade_and_the_part_that_failed(hass, monkeypat
                 await fake.stop()
 
 
+async def test_r4_a_shade_dropped_between_the_two_queries_keeps_the_signal_result(hass, monkeypatch):
+    """The hub forgets the shade after the serial reply landed and before the battery
+    query: the error names that part, and still reports the signal query answered."""
+    fake = FakeSerialHub()
+    ws = FakeWebsocket()
+    with patch.object(devices.Hub, "sendws", new=ws):
+        hub = await _hub_with_shades(hass, fake)
+        try:
+            office = _button_entity(hass, "button.office_refresh")
+
+            async def drop_then_key_error(rollerid):
+                hub.api.rollers.pop(rollerid)
+                raise KeyError(rollerid)
+
+            monkeypatch.setattr(hub.api, "query_details", drop_then_key_error)
+            with pytest.raises(HomeAssistantError) as err:
+                await office.async_press()
+            await settle(hass)
+            message = str(err.value)
+            assert "Office" in message
+            assert "battery query could not be sent" in message
+            assert "no longer known to the hub" in message
+            assert "signal query was answered" in message
+            assert fake.received == ["!DEFr?;"]
+            assert hass.states.get("sensor.office_signal").state == "-92", "the reading that landed is kept"
+            assert ws.sent == []
+        finally:
+            await fake.stop()
+
+
 # --- R5: the existing connection and locks; rapid presses share one refresh ----------
 
 
