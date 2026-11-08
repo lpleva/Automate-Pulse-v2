@@ -446,7 +446,7 @@ async def test_r5_library_query_details_uses_send_payload_and_is_spaced_per_shad
     clock.now += 60
     hub.running = False
     with pytest.raises(errors.NotRunningException):
-        await hub.query_details("DEF")
+        await hub.query_details("ABC")
     assert len(sent) == 4
 
 

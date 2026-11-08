@@ -160,11 +160,18 @@ The package needed no import rewrite: it already used relative imports.
     At most one request per roller per `details_query_spacing()`, which is the
     poll interval with a floor of `MIN_DETAILS_QUERY_SPACING` (10 s): the result
     cannot show before the next poll, so a second request before it only costs
-    the radio. A call inside that window returns False and sends nothing; a
-    sent request returns True and records its time (`_details_queried_at`); a
-    failed send (`NotConnectedException`, `NotRunningException`, raised by
+    the radio. The send runs as one task per roller (`_details_queries`,
+    awaited through `asyncio.shield` like `_signal_queries`): callers arriving
+    while it is in flight await that same send and get its result or its
+    exception, since a real send yields at drain and six concurrent presses
+    would otherwise each see no stamp and each send. A call inside the window
+    after a sent request returns False and sends nothing; a sent request
+    returns True and records its time (`_details_queried_at`) inside the task;
+    a failed send (`NotConnectedException`, `NotRunningException`, raised by
     `send_payload` as before) records nothing, so the next call tries again.
-    `KeyError` for an unknown id. The startup path in `_roller_newvals` that
+    `KeyError` for an unknown id, dropping that id's stamp and pending task so
+    the records mirror `rollers`; the tasks are cancelled with the other
+    background tasks. The startup path in `_roller_newvals` that
     queues `query` once when a shade's shadow entry lacks `vo` is unchanged
     and still goes through `payload_queue`. The integration's Refresh button
     and `automate.refresh` action call this after `query_signal`.

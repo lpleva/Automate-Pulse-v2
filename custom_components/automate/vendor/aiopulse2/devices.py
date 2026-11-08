@@ -246,8 +246,12 @@ class Hub:
         self._signal_queries: Dict[str, asyncio.Task] = {}
         # time.monotonic() when the last shadow "query" request for each roller
         # was SENT (query_details); a request within details_query_spacing() of
-        # it is shared with that one instead of being sent again.
+        # it is shared with that one instead of being sent again. And the sends
+        # in flight, by roller id: callers arriving while one is pending await
+        # that same send (a real send yields at drain, so without this six
+        # concurrent presses would each see no stamp and each send).
         self._details_queried_at: Dict[str, float] = {}
+        self._details_queries: Dict[str, asyncio.Task] = {}
         self._sweep_position = 0
         self.sent_details_request = set()
         self.payload_queue = []
@@ -575,27 +579,47 @@ class Hub:
         refresh a battery reading on demand; the serial protocol has no voltage
         query. A read request only: it moves nothing and sets nothing.
 
-        At most one request per roller per details_query_spacing(): a call
-        within that window of the last one SENT returns False and sends nothing
-        (the pending request serves it), so a button pressed six times, or an
-        automation in a loop, costs the radio one exchange. Returns True when
-        the request was sent. Raises NotRunningException when the hub is not
-        running, NotConnectedException when the websocket is not connected or
-        the send failed (neither is recorded, so the next call tries again), and
-        KeyError for an id this hub does not know.
+        At most one request per roller per details_query_spacing(): callers
+        arriving while a send for the roller is in flight await that same send
+        and get its result (or its exception), and a call within the window of
+        the last one SENT returns False and sends nothing (the pending request
+        serves it), so a button pressed six times, or an automation in a loop,
+        costs the radio one exchange. Returns True when the request was sent.
+        Raises NotRunningException when the hub is not running,
+        NotConnectedException when the websocket is not connected or the send
+        failed (neither is recorded, so the next call tries again), and
+        KeyError for an id this hub does not know, dropping that id's records
+        so they mirror `rollers`.
         """
         if rollerid not in self.rollers:
+            self._details_queried_at.pop(rollerid, None)
+            self._details_queries.pop(rollerid, None)
             raise KeyError(rollerid)
-        last = self._details_queried_at.get(rollerid)
-        now = time.monotonic()
-        if last is not None and now - last < self.details_query_spacing():
-            _LOGGER.debug(
-                "%s: details query for %s sent %.0fs ago, not sending another",
-                self.host,
-                rollerid,
-                now - last,
+        task = self._details_queries.get(rollerid)
+        if task is None:
+            last = self._details_queried_at.get(rollerid)
+            now = time.monotonic()
+            if last is not None and now - last < self.details_query_spacing():
+                _LOGGER.debug(
+                    "%s: details query for %s sent %.0fs ago, not sending another",
+                    self.host,
+                    rollerid,
+                    now - last,
+                )
+                return False
+            task = self.loop.create_task(self._send_details_query(rollerid))
+            self._details_queries[rollerid] = task
+            task.add_done_callback(
+                lambda t: self._details_queries.pop(rollerid, None)
+                if self._details_queries.get(rollerid) is t
+                else None
             )
-            return False
+        # Shielded, as query_signal: one caller giving up must not cancel the
+        # send the others are waiting on.
+        return await asyncio.shield(task)
+
+    async def _send_details_query(self, rollerid: str) -> bool:
+        """The one send behind query_details; stamps the roller once it went out."""
         await self.send_payload(
             {
                 "method": "shadow",
@@ -1095,6 +1119,7 @@ class Hub:
                 self.serial_task,
                 self.signal_task,
                 *self._signal_queries.values(),
+                *self._details_queries.values(),
             )
             if t and not t.done()
         ]
