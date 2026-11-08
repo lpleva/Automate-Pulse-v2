@@ -18,7 +18,8 @@ merges upstream into it and the delta is audited before it reaches `main`.
   the motor, with the websocket shadow write the Pulse app sends when you open
   a shade (`desired: {shades: {<id>: {query: true}}}`, documented in the
   2026-10-12 app teardown); the hub polls the motor over radio and the next
-  hub poll carries a fresh voltage, which the Battery sensor and its `voltage`
+  hub poll, or the one after if the motor has not answered the hub by then,
+  carries a fresh voltage, which the Battery sensor and its `voltage`
   attribute follow (checked: a changed `vo` is applied on every poll, not only
   the first). Until now the voltage was requested once, at startup, and only
   for a shade whose hub record had none; afterwards it was whatever the hub
@@ -47,8 +48,9 @@ merges upstream into it and the delta is audited before it reaches `main`.
   the two read queries are sent: nothing that moves a shade or touches its
   limits. **What this changes in the house:** pressing Refresh on a shade (or
   calling `automate.refresh` from the dashboard) now also gets its battery
-  reading current within one poll (up to 30 s), instead of the battery
-  showing whatever the hub cached at startup; the button's name on the device
+  reading current by the next hub poll or the one after (up to about 60 s at
+  the house's 30 s), instead of the battery showing whatever the hub cached at
+  startup; the button's name on the device
   page changes from "Refresh signal" to "Refresh" and its icon from the Wi-Fi
   arrow to a plain refresh arrow (the diagnostics dump lists it under
   `refresh`), and nothing else moves.
@@ -108,7 +110,7 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ### Testing
 
-- 169 tests (161 before), in `test/test_refresh.py`, one per requirement,
+- 170 tests (161 before), in `test/test_refresh.py`, one per requirement,
   written before the code: an existing install keeps
   `button.<shade>_refresh_signal` with the name "Refresh" and a fresh shade
   gets `button.<shade>_refresh`, both on the same unique id; one press sends

@@ -37,8 +37,9 @@ class AutomateRefresh(AutomateBase, ButtonEntity):
     Two read queries through the hub's existing connections (PulseHub.async_refresh):
     the serial `!<id>r?;` query the live sweep sends, whose reply updates the
     Signal sensor and the cover position at once, and the websocket shadow
-    `query` for the shade, after which the hub re-reads the motor and the next
-    shadow poll brings a fresh battery voltage. It never moves the shade or
+    `query` for the shade, after which the hub re-reads the motor over radio and
+    the next shadow poll, or the one after, brings a fresh battery voltage. It
+    never moves the shade or
     touches its settings. Diagnostic, so Home Assistant keeps it off
     auto-generated dashboards.
 

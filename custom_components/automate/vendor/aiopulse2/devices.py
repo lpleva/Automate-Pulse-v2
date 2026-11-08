@@ -574,8 +574,9 @@ class Hub:
         desired key `query: true`), in the envelope this library's other shadow
         writes use, through send_payload: the one websocket, its handshake wait
         and its send timeout. The hub then polls the motor over RF and the next
-        shadow poll carries the fresh values, which wsconsumer applies as usual
-        (a changed "vo" reaches the roller's battery). It is the only way to
+        shadow poll, or the one after if the motor has not answered by then,
+        carries the fresh values, which wsconsumer applies as usual (a changed
+        "vo" reaches the roller's battery). It is the only way to
         refresh a battery reading on demand; the serial protocol has no voltage
         query. A read request only: it moves nothing and sets nothing.
 

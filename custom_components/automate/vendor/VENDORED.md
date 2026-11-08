@@ -153,7 +153,8 @@ The package needed no import rewrite: it already used relative imports.
     queryDevice sends, `desired: {shades: {<id>: {query: true}}}`, in the same
     envelope as `move_to` / `move_stop` and through `send_payload` (the one
     websocket, the handshake wait, the send timeout), so the hub re-reads that
-    motor over RF and the next shadow poll carries a fresh `vo`, `mp` and `rs`,
+    motor over RF and the next shadow poll, or the one after if the motor has
+    not answered by then, carries a fresh `vo`, `mp` and `rs`,
     applied by `wsconsumer` as any other poll (a changed `vo` reaches
     `Roller.battery`). The serial protocol has no voltage query, so this is the
     only on-demand battery refresh. A read request: it moves and sets nothing.

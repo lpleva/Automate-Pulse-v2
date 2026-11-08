@@ -58,9 +58,11 @@ holds:
   (a shade that does not answer counts as a missed check while the sweep is
   on);
 - a request for the hub to re-read the motor (the shadow `query` the Pulse app
-  sends when you open a shade): the hub polls the motor over radio and the
-  **Battery sensor** (and its `voltage` attribute) updates on the next hub poll,
-  so within one hub state poll interval (the Options setting; 10 s by default).
+  sends when you open a shade): the hub polls the motor over radio, and the
+  **Battery sensor** (and its `voltage` attribute) updates by the next hub poll
+  or the one after (the motor has to answer the hub first), so within two hub
+  state poll intervals (the Options setting: 20 s at the default of 10 s,
+  about 60 s at 30 s).
 
 It never moves a shade or changes its settings. If anything fails (the hub is
 disconnected, the shade is offline, the serial port or the websocket cannot be
