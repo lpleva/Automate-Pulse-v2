@@ -148,6 +148,26 @@ The package needed no import rewrite: it already used relative imports.
     could not (`serial_open_failures`: refused, no route, connect timeout),
     then re-raises as before. Memory only, one small dict per shade; nothing
     new is logged. The integration's `diagnostics.py` reads these.
+17. **On-demand motor re-read (battery), spaced per shade (1.7.0).**
+    `Hub.query_details(rollerid)` sends the shadow write the Pulse app's
+    queryDevice sends, `desired: {shades: {<id>: {query: true}}}`, in the same
+    envelope as `move_to` / `move_stop` and through `send_payload` (the one
+    websocket, the handshake wait, the send timeout), so the hub re-reads that
+    motor over RF and the next shadow poll carries a fresh `vo`, `mp` and `rs`,
+    applied by `wsconsumer` as any other poll (a changed `vo` reaches
+    `Roller.battery`). The serial protocol has no voltage query, so this is the
+    only on-demand battery refresh. A read request: it moves and sets nothing.
+    At most one request per roller per `details_query_spacing()`, which is the
+    poll interval with a floor of `MIN_DETAILS_QUERY_SPACING` (10 s): the result
+    cannot show before the next poll, so a second request before it only costs
+    the radio. A call inside that window returns False and sends nothing; a
+    sent request returns True and records its time (`_details_queried_at`); a
+    failed send (`NotConnectedException`, `NotRunningException`, raised by
+    `send_payload` as before) records nothing, so the next call tries again.
+    `KeyError` for an unknown id. The startup path in `_roller_newvals` that
+    queues `query` once when a shade's shadow entry lacks `vo` is unchanged
+    and still goes through `payload_queue`. The integration's Refresh button
+    and `automate.refresh` action call this after `query_signal`.
 
 `__init__.py`: exports `HubBaseException`; `__version__` is `1.0.0+lpleva`.
 `const.py`, `errors.py`: unchanged.
@@ -163,11 +183,13 @@ The package needed no import rewrite: it already used relative imports.
 - **The hub has no authentication** on either port, and the serial port accepts
   movement commands (`o`, `c`, `m<pct>`). That is the hub's design; the library
   neither adds nor could add protection. Keep the hub on a trusted VLAN.
-- **Payloads that write to the hub.** Exactly three `desired` writes exist:
-  `movePercent` and `stopShade`, sent only from `Roller.move_to` / `move_stop`
-  (user commands), and `{"query": True}`, queued once per roller per hour at
-  most when its shadow entry lacks `vo`. The query asks the hub to poll that
-  motor for voltage and version; it does not move anything. The heartbeat's
+- **Payloads that write to the hub.** Exactly three `desired` keys are ever
+  sent: `movePercent` and `stopShade`, sent only from `Roller.move_to` /
+  `move_stop` (user commands), and `{"query": True}`, queued once per roller
+  per hour at most when its shadow entry lacks `vo`, and sent on demand by
+  `Hub.query_details` (item 17), at most once per roller per poll interval.
+  The query asks the hub to poll that motor for voltage, position and signal;
+  it does not move anything. The heartbeat's
   `{"method": "shadow", "src": "app", "id": ...}` is a read.
 - The battery percentage curves (8.3 V and 12 V, split at 9.0 V) are upstream's
   heuristic, discontinuous at the split; left as is for want of real data.

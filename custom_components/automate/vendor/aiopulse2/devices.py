@@ -79,6 +79,14 @@ SIGNAL_POLL_REPLY_TIMEOUT = 8
 # position again.
 SIGNAL_STALE_ROUNDS = 3
 
+# The shadow "query" request (Hub.query_details) makes the hub re-read one motor
+# over RF: position, voltage and signal. Its result is only visible on the next
+# shadow poll, so a second request for the same shade before that poll buys
+# nothing and costs a radio exchange. Hub.details_query_spacing() is therefore
+# the poll interval, with this floor for a fast poll (one radio exchange per
+# shade per 10 s at most, whoever presses).
+MIN_DETAILS_QUERY_SPACING = 10
+
 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
 # The hub presents a self-signed certificate, so it cannot be verified against a CA.
@@ -236,6 +244,10 @@ class Hub:
         # On-demand signal queries in flight, by roller id: callers arriving while
         # one is pending share its result instead of queueing another session.
         self._signal_queries: Dict[str, asyncio.Task] = {}
+        # time.monotonic() when the last shadow "query" request for each roller
+        # was SENT (query_details); a request within details_query_spacing() of
+        # it is shared with that one instead of being sent again.
+        self._details_queried_at: Dict[str, float] = {}
         self._sweep_position = 0
         self.sent_details_request = set()
         self.payload_queue = []
@@ -541,6 +553,60 @@ class Hub:
         # Shielded: one caller giving up must not cancel the query the others
         # (and the hub) are already committed to.
         return await asyncio.shield(task)
+
+    def details_query_spacing(self) -> float:
+        """Seconds between two shadow "query" requests for the same roller.
+
+        The hub's poll interval, since the request's result (a fresh "vo", "mp"
+        and "rs" in the shadow) cannot show before the next poll, with a floor
+        of MIN_DETAILS_QUERY_SPACING for a fast poll.
+        """
+        return max(self.heartbeatinterval, MIN_DETAILS_QUERY_SPACING)
+
+    async def query_details(self, rollerid: str) -> bool:
+        """Ask the hub to re-read ONE motor now: position, voltage and signal.
+
+        The websocket write the Pulse app's queryDevice sends (the per-shade
+        desired key `query: true`), in the envelope this library's other shadow
+        writes use, through send_payload: the one websocket, its handshake wait
+        and its send timeout. The hub then polls the motor over RF and the next
+        shadow poll carries the fresh values, which wsconsumer applies as usual
+        (a changed "vo" reaches the roller's battery). It is the only way to
+        refresh a battery reading on demand; the serial protocol has no voltage
+        query. A read request only: it moves nothing and sets nothing.
+
+        At most one request per roller per details_query_spacing(): a call
+        within that window of the last one SENT returns False and sends nothing
+        (the pending request serves it), so a button pressed six times, or an
+        automation in a loop, costs the radio one exchange. Returns True when
+        the request was sent. Raises NotRunningException when the hub is not
+        running, NotConnectedException when the websocket is not connected or
+        the send failed (neither is recorded, so the next call tries again), and
+        KeyError for an id this hub does not know.
+        """
+        if rollerid not in self.rollers:
+            raise KeyError(rollerid)
+        last = self._details_queried_at.get(rollerid)
+        now = time.monotonic()
+        if last is not None and now - last < self.details_query_spacing():
+            _LOGGER.debug(
+                "%s: details query for %s sent %.0fs ago, not sending another",
+                self.host,
+                rollerid,
+                now - last,
+            )
+            return False
+        await self.send_payload(
+            {
+                "method": "shadow",
+                "args": {
+                    "desired": {"shades": {rollerid: {"query": True}}},
+                    "timeStamp": time.time(),
+                },
+            }
+        )
+        self._details_queried_at[rollerid] = time.monotonic()
+        return True
 
     def signal_stale_after(self) -> float:
         """Seconds after which a live serial reading no longer counts as current."""
