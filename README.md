@@ -46,21 +46,48 @@ Settings > Devices & services > Automate Pulse Hub v2 > Configure:
 
 A change to either reloads the integration.
 
-## Refresh a shade's signal on demand (this fork)
+## Refresh a shade on demand (this fork)
 
-Each shade also has a diagnostic **Refresh signal** button
-(`button.<shade>_refresh_signal`, kept off auto-generated dashboards). Pressing
-it sends that one shade the same query the live sweep sends on its turn, right
-away; the shade's Signal sensor updates when it answers (a shade that does not
-answer shows an error, and counts as a missed check while the sweep is on). It
-never moves a shade or changes its settings. The same query is available as the
-action **`automate.refresh_signal`**, which takes standard targets (a shade's
-cover or its button; a device or an area works too) and asks each shade in turn.
+Each shade also has a diagnostic **Refresh** button (kept off auto-generated
+dashboards). Pressing it refreshes that one shade's signal, position and
+battery, with two read queries over the connections the integration already
+holds:
+
+- the same serial query the live sweep sends on its turn (`!<id>r?;`): the
+  shade's Signal sensor and the cover's position update as soon as it answers
+  (a shade that does not answer counts as a missed check while the sweep is
+  on);
+- a request for the hub to re-read the motor (the shadow `query` the Pulse app
+  sends when you open a shade): the hub polls the motor over radio and the
+  **Battery sensor** (and its `voltage` attribute) updates on the next hub poll,
+  so within one hub state poll interval (the Options setting; 10 s by default).
+
+It never moves a shade or changes its settings. If anything fails (the hub is
+disconnected, the shade is offline, the serial port or the websocket cannot be
+reached, the shade does not answer) the press shows one error naming the shade,
+each part that failed and what still worked.
+
+The button was called **Refresh signal** until 1.6.1 and refreshed the signal
+and position only. An install from then keeps its entity id
+(`button.<shade>_refresh_signal`, since the unique id did not change), so
+dashboards and automations keep working; a shade first seen by 1.7.0 or later
+gets `button.<shade>_refresh`.
+
+The same refresh is available as the action **`automate.refresh`**, which takes
+standard targets (a shade's cover or its button; a device or an area works
+too) and refreshes each shade in turn. The older action
+**`automate.refresh_signal`** still exists and still does what it did: the
+serial signal query alone, no battery, so an automation that watches signal
+quality on a schedule does not also make the hub re-read every motor.
+
 Whoever asks, the hub's serial port is opened one session at a time and no
 sooner than 0.75 s after the last one closed, and presses for a shade whose
-query is still pending share its answer, so neither a card nor an automation
-can flood the hub's radio. With the sweep off the live reading shows until the
-next hub poll puts the hub's cached value back.
+serial query is still pending share its answer; the battery request is sent at
+most once per shade per hub state poll interval (never more often than every
+10 s), because its result cannot show before the next poll anyway, and a press
+inside that window shares the pending request. So neither a card nor an
+automation can flood the hub's radio. With the sweep off the live signal
+reading shows until the next hub poll puts the hub's cached value back.
 
 ## Delete a stale shade device (this fork)
 

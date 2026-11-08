@@ -7,6 +7,52 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ## Unreleased
 
+### Changed
+
+- **One Refresh per shade: signal, position and battery together.** Each
+  shade's button is now called **Refresh** (it was "Refresh signal") and a
+  press refreshes everything the shade reports, with two read queries over
+  the connections the integration already holds. The serial query the live
+  sweep sends (`!<id>r?;`) goes first, and its reply lands as the Signal
+  sensor and the cover position right away. Then the hub is asked to re-read
+  the motor, with the websocket shadow write the Pulse app sends when you open
+  a shade (`desired: {shades: {<id>: {query: true}}}`, documented in the
+  2026-10-12 app teardown); the hub polls the motor over radio and the next
+  hub poll carries a fresh voltage, which the Battery sensor and its `voltage`
+  attribute follow (checked: a changed `vo` is applied on every poll, not only
+  the first). Until now the voltage was requested once, at startup, and only
+  for a shade whose hub record had none; afterwards it was whatever the hub
+  had cached. Serial first so the two radio exchanges with the motor do not
+  overlap. **The entity id does not change on an existing install**
+  (`button.<shade>_refresh_signal`): the unique id is the same, so the
+  dashboard and anything else that refers to the button keep working; a shade
+  first seen by this release gets `button.<shade>_refresh`. The same refresh
+  is the new action **`automate.refresh`** (standard targets, each shade in
+  turn). **`automate.refresh_signal` is kept as it was**, the serial signal
+  query alone: its name says signal, and an automation that polls signal
+  quality on a schedule should not also make the hub re-read every motor each
+  time; nothing in the house calls it today. Errors stay one clear message
+  per shade: a disconnected hub or an offline shade sends nothing and says
+  so; otherwise both queries are always attempted, and the message names each
+  part that failed (the serial port could not be reached, the websocket is
+  not connected, the shade did not answer) and what still worked, so one
+  part's failure never hides the other's result (the action logs the same
+  message per shade and carries on). No new connection and no new command: the
+  serial query runs under the library's existing lock and spacing (one
+  session at a time, 0.75 s apart, rapid presses share a pending query), and
+  the battery request goes through the library's existing websocket send, at
+  most once per shade per hub state poll interval (30 s in the house; never
+  more often than every 10 s), since its result cannot show before the next
+  poll anyway; a press inside that window shares the pending request. Only
+  the two read queries are sent: nothing that moves a shade or touches its
+  limits. **What this changes in the house:** pressing Refresh on a shade (or
+  calling `automate.refresh` from the dashboard) now also gets its battery
+  reading current within one poll (up to 30 s), instead of the battery
+  showing whatever the hub cached at startup; the button's name on the device
+  page changes from "Refresh signal" to "Refresh" and its icon from the Wi-Fi
+  arrow to a plain refresh arrow (the diagnostics dump lists it under
+  `refresh`), and nothing else moves.
+
 ### Fixed
 
 - **A closed shade no longer flashes "open" with a negative position.** The hub
@@ -62,6 +108,26 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ### Testing
 
+- 169 tests (161 before), in `test/test_refresh.py`, one per requirement,
+  written before the code: an existing install keeps
+  `button.<shade>_refresh_signal` with the name "Refresh" and a fresh shade
+  gets `button.<shade>_refresh`, both on the same unique id; one press sends
+  the serial query and the shadow `query` for that shade only, and a changed
+  voltage on the next poll reaches the Battery sensor and its `voltage`
+  attribute while the other shade is untouched; `automate.refresh` refreshes
+  each target once in order and `automate.refresh_signal` sends the serial
+  query alone; every error case names the shade and the part (disconnected
+  hub, offline shade, silent shade with the battery query still sent, websocket
+  send failed or never connected with the signal reading still landed, serial
+  port dead with the battery query still sent, both dead, a shade the hub
+  forgot) and the action logs them per shade; six presses at once are one
+  serial session and one `query`, a press 10 s later repeats the serial query
+  but shares the battery request, another shade is not held back, and a press
+  past the spacing sends a new request, with no second websocket; the library
+  half sends through `send_payload`, spaces per shade at the poll interval
+  with the 10 s floor, and does not count a failed send; a refresh of every
+  shade sends `r?` and `query` and nothing else; the action is described in
+  `services.yaml`, both translation files, the README and this changelog.
 - 122 tests (109 before), in `test/test_hub_qualified_ids.py`: every entity's
   unique id and the shade device's identifier carry the hub id and the hub's
   own device keeps its bare id; a hub resolves only its own ids, and "M4" is
