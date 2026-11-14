@@ -199,7 +199,7 @@ async def test_removing_one_hubs_m4g_leaves_the_other_hubs_m4g(hass, config_entr
     ) is not None
 
 
-async def test_removing_a_shade_uses_the_current_device_registry_call(hass, config_entry):
+async def test_removing_a_shade_uses_the_current_device_registry_call(hass, config_entry, caplog):
     """HA deprecated `async_update_device(remove_config_entry_id=...)`; a shade that is
     gone is removed with `async_remove_device`, and the result is the same."""
     hub_a, _hub_b, other_entry = await _two_hubs_both_with_m4g(hass, config_entry)
@@ -207,7 +207,9 @@ async def test_removing_a_shade_uses_the_current_device_registry_call(hass, conf
     device_a = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("M4G")), config_entry.entry_id)
     deprecated = {"add_config_entry_id", "add_config_subentry_id", "remove_config_entry_id", "remove_config_subentry_id"}
 
+    caplog.clear()
     with (
+        caplog.at_level(logging.DEBUG),
         patch.object(dev_reg, "async_update_device", wraps=dev_reg.async_update_device) as update,
         patch.object(dev_reg, "async_remove_device", wraps=dev_reg.async_remove_device) as remove,
     ):
@@ -217,6 +219,13 @@ async def test_removing_a_shade_uses_the_current_device_registry_call(hass, conf
     for call in update.call_args_list:
         assert not deprecated & set(call.kwargs), call
     remove.assert_called_once_with(device_a.id)
+    # The shade has four entities (cover, signal, battery, refresh) and each one
+    # handles the remove signal: the first removes the device, the other three find
+    # it already gone and must pass quietly.
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not errors, [r.getMessage() for r in errors]
+    removed = [r for r in caplog.records if r.getMessage().startswith("Removing ")]
+    assert len(removed) == 4, [r.getMessage() for r in removed]
     assert dev_reg.async_get(device_a.id) is None
     assert dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id), "hub A's own device stays"
     assert dev_reg.async_get_device_by_identifier(

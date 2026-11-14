@@ -65,7 +65,8 @@ class AutomateBase(entity.Entity):
             # The lookup above is scoped to this hub's config entry, so the device
             # is this hub's. HA deprecated async_update_device(remove_config_entry_id=...)
             # (a device belongs to one config entry); removing the device outright is
-            # what that call did.
+            # what that call did (this integration never calls add_config_entry_id,
+            # so there was never a move to perform).
             dev_registry.async_remove_device(device.id)
 
         await self.async_remove()
