@@ -57,6 +57,15 @@ merges upstream into it and the delta is audited before it reaches `main`.
 
 ### Fixed
 
+- **Removing a shade the hub no longer reports uses Home Assistant's current
+  device call.** The integration removed the shade's device with
+  `async_update_device(remove_config_entry_id=...)`, which Home Assistant
+  deprecated once a device belongs to one config entry; it now calls
+  `async_remove_device`, which is what the old call did. Nothing you see
+  changes: entity ids, unique ids and device identifiers (`<hub id>_<motor id>`)
+  are the same. The two-hub test reads `DeviceEntry.config_entry_id` instead of
+  the deprecated `config_entries`, and a new test proves the removal makes no
+  deprecated call and leaves the hub's device and the other hub's shade alone.
 - **A closed shade no longer flashes "open" with a negative position.** The hub
   sometimes reports a position that cannot exist: 125, 155 and 200 for shades
   that were closed (100) and had not moved (`cover.master_bedroom_main`

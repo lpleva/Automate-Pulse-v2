@@ -8,7 +8,7 @@ install (bare motor ids) is migrated in place when the entry loads.
 """
 
 import logging
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -146,8 +146,10 @@ async def test_two_hubs_with_the_same_motor_id_coexist(hass, config_entry):
     assert device_a.name == "Living room right" and device_b.name == "Spare bedroom side"
     assert device_a.via_device_id == dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id).id
     assert device_b.via_device_id == dev_reg.async_get_device_by_identifier((DOMAIN, OTHER_HUB_ID), other_entry.entry_id).id
-    assert device_a.config_entries == {config_entry.entry_id}
-    assert device_b.config_entries == {other_entry.entry_id}
+    # A device belongs to one config entry (`config_entry_id`); the old
+    # `config_entries` set is deprecated in HA and raises when a test reads it.
+    assert device_a.config_entry_id == config_entry.entry_id
+    assert device_b.config_entry_id == other_entry.entry_id
 
     # An update on one hub's M4G leaves the other's alone.
     await feed(hass, hub_b, {"M4G": {"mp": 50}}, hub_id=OTHER_HUB_ID, name="Spare bedroom hub")
@@ -195,6 +197,33 @@ async def test_removing_one_hubs_m4g_leaves_the_other_hubs_m4g(hass, config_entr
     assert dev_reg.async_get_device_by_identifier(
         (DOMAIN, shade_id("M4G", hub_id=OTHER_HUB_ID)), other_entry.entry_id
     ) is not None
+
+
+async def test_removing_a_shade_uses_the_current_device_registry_call(hass, config_entry):
+    """HA deprecated `async_update_device(remove_config_entry_id=...)`; a shade that is
+    gone is removed with `async_remove_device`, and the result is the same."""
+    hub_a, _hub_b, other_entry = await _two_hubs_both_with_m4g(hass, config_entry)
+    dev_reg = dr.async_get(hass)
+    device_a = dev_reg.async_get_device_by_identifier((DOMAIN, shade_id("M4G")), config_entry.entry_id)
+    deprecated = {"add_config_entry_id", "add_config_subentry_id", "remove_config_entry_id", "remove_config_subentry_id"}
+
+    with (
+        patch.object(dev_reg, "async_update_device", wraps=dev_reg.async_update_device) as update,
+        patch.object(dev_reg, "async_remove_device", wraps=dev_reg.async_remove_device) as remove,
+    ):
+        async_dispatcher_send(hass, AUTOMATE_ENTITY_REMOVE.format(hub_a.shade_identifier("M4G")))
+        await settle(hass)
+
+    for call in update.call_args_list:
+        assert not deprecated & set(call.kwargs), call
+    remove.assert_called_once_with(device_a.id)
+    assert dev_reg.async_get(device_a.id) is None
+    assert dev_reg.async_get_device_by_identifier((DOMAIN, HUB_ID), config_entry.entry_id), "hub A's own device stays"
+    assert dev_reg.async_get_device_by_identifier(
+        (DOMAIN, shade_id("M4G", hub_id=OTHER_HUB_ID)), other_entry.entry_id
+    ), "the other hub's M4G stays"
+    ent_reg = er.async_get(hass)
+    assert not [e.entity_id for e in ent_reg.entities.values() if e.device_id == device_a.id]
 
 
 async def test_a_stale_device_is_judged_against_its_own_hub(hass, config_entry):
