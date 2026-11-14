@@ -10,5 +10,28 @@
     "note": "Upstream v1.0.1 tip (2026-02-12), the fork point. Covered by the full audit of 2026-10-08 (fork release 1.1.0; CHANGELOG 1.1.0; aiopulse2 1.0.0 vendored and audited with it). Upstream master has not moved since."
   },
   "notes": [],
-  "commits": []
+  "commits": [
+    {
+      "sha": "405758853f0de207d90287aaf983fc6a11b7a227",
+      "date": "2026-10-20",
+      "subject": "Add local brand assets",
+      "bucket": "implement",
+      "status": "pending",
+      "reason": "Adds four PNG images (icon and logo, normal and 2x) in custom_components/automate/brand so HA 2026.3+ shows the integration's icon. Images only, no code, no new host; cosmetic cleanup with no behavior change.",
+      "implemented_in": [],
+      "triaged": "2026-11-14",
+      "source": "triage"
+    },
+    {
+      "sha": "495092f8dc21d6e7a967e7a40ca45366c3337d76",
+      "date": "2026-11-13",
+      "subject": "Merge pull request #50 from frenck/frenck/add-brand-assets-automate",
+      "bucket": "implement",
+      "status": "pending",
+      "reason": "Merge of upstream PR #50, which brings in commit 4057588 (the brand images) and nothing else; same bucket as that commit.",
+      "implemented_in": [],
+      "triaged": "2026-11-14",
+      "source": "triage"
+    }
+  ]
 }
