@@ -16,9 +16,11 @@
       "date": "2026-10-20",
       "subject": "Add local brand assets",
       "bucket": "implement",
-      "status": "pending",
+      "status": "implemented",
       "reason": "Adds four PNG images (icon and logo, normal and 2x) in custom_components/automate/brand so HA 2026.3+ shows the integration's icon. Images only, no code, no new host; cosmetic cleanup with no behavior change.",
-      "implemented_in": [],
+      "implemented_in": [
+        "90885e14331c45f3ee1afa16665a55314d75e8e0"
+      ],
       "triaged": "2026-11-14",
       "source": "triage"
     },
